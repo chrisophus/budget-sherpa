@@ -36,10 +36,14 @@ if (config.actualCaCert) {
   process.env.NODE_EXTRA_CA_CERTS = config.actualCaCert;
 }
 
-// Find QFX files in current directory
-const qfxFiles = readdirSync('./')
+// Find QFX files — use --dir argument or current directory
+const dirArg = process.argv.find(a => a.startsWith('--dir='))?.slice(6)
+  ?? process.argv[process.argv.indexOf('--dir') + 1];
+const qfxDir = resolve(dirArg ?? '.');
+
+const qfxFiles = readdirSync(qfxDir)
   .filter(f => f.toLowerCase().endsWith('.qfx'))
-  .map(f => resolve(f));
+  .map(f => resolve(qfxDir, f));
 
 if (qfxFiles.length === 0) {
   console.error('No QFX files found in current directory.');
