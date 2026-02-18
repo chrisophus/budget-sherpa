@@ -1,4 +1,4 @@
-import { input, select, confirm } from '@inquirer/prompts';
+import { input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { RawTransaction, Rule, VettedRule, LLMAdapter } from '../types.js';
 import { ruleKey, findPreRule, findCategoryRule } from '../rules/engine.js';
@@ -153,4 +153,33 @@ export async function vetCategoryRule(
       return { category: proposed, rule: vettedRule };
     }
   }
+}
+
+// --- Stage 3: Tag assignment ---
+
+const TAG_CHOICES = [
+  { name: 'Fixed          #fixed', value: 'fixed' },
+  { name: 'Discretionary  #discretionary', value: 'discretionary' },
+  { name: 'Subscription   #subscription', value: 'subscription' },
+  { name: 'Skip (no tag)', value: '' },
+] as const;
+
+export async function vetTag(
+  cleanPayee: string,
+  vetted: VettedRuleStore,
+): Promise<string | null> {
+  // Already decided in a prior session
+  if (vetted.hasTag(cleanPayee)) {
+    return vetted.getTag(cleanPayee);
+  }
+
+  const tag = await select({
+    message: `Tag "${cleanPayee}":`,
+    choices: TAG_CHOICES as any,
+  }) as string;
+
+  const result = tag === '' ? null : tag;
+  vetted.setTag(cleanPayee, result);
+  if (result) console.log(chalk.green(`✓ Tagged: "${cleanPayee}" → #${result}`));
+  return result;
 }

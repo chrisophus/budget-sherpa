@@ -21,11 +21,11 @@ export class ActualClient {
   }
 
   async getCategories(): Promise<Array<{ id: string; name: string; group_id: string }>> {
-    return api.getCategories();
+    return api.getCategories() as any;
   }
 
   async createRule(rule: Omit<Rule, 'id'>): Promise<string> {
-    return api.createRule(rule as any);
+    return api.createRule(rule as any) as any;
   }
 
   async getBudgets(): Promise<Array<{ groupId: string; name: string }>> {
@@ -40,8 +40,12 @@ export class ActualClient {
     return api.createPayee({ name }) as any;
   }
 
-  async addTransactions(accountId: string, transactions: any[]): Promise<{ added: string[]; updated: string[] }> {
-    return api.addTransactions(accountId, transactions) as any;
+  async createAccount(account: { name: string; type: string }, initialBalance = 0): Promise<string> {
+    return api.createAccount(account as any, initialBalance) as any;
+  }
+
+  async importTransactions(accountId: string, transactions: any[]): Promise<{ added: string[]; updated: string[]; errors: any[] }> {
+    return api.importTransactions(accountId, transactions) as any;
   }
 
   async shutdown(): Promise<void> {

@@ -1,3 +1,12 @@
+// --- QFX file metadata ---
+
+export interface QfxFileMeta {
+  filepath: string;
+  acctId: string;
+  acctType: 'credit' | 'checking' | 'savings';
+  lastFour: string;
+}
+
 // --- Transactions ---
 
 export interface RawTransaction {
@@ -63,6 +72,7 @@ export interface VettedRule {
 export interface VettedStore {
   version: 1;
   rules: Record<string, VettedRule>;
+  tags: Record<string, string | null>; // cleanPayee → tag name (null = explicitly none)
 }
 
 // --- LLM ---

@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import type { RawTransaction } from '../types.js';
+import type { RawTransaction, QfxFileMeta } from '../types.js';
 
 export function parseQfx(filepath: string): RawTransaction[] {
   const content = readFileSync(filepath, 'utf-8');
@@ -28,4 +28,18 @@ export function parseQfx(filepath: string): RawTransaction[] {
 
 export function parseQfxFiles(filepaths: string[]): RawTransaction[] {
   return filepaths.flatMap(parseQfx);
+}
+
+export function parseQfxMeta(filepaths: string[]): QfxFileMeta[] {
+  return filepaths.map(filepath => {
+    const content = readFileSync(filepath, 'utf-8');
+    const acctId = content.match(/<ACCTID>([^\n<]+)/)?.[1]?.trim() ?? 'unknown';
+    const isCredit = /<CCACCTFROM>/.test(content);
+    const acctTypeRaw = content.match(/<ACCTTYPE>([^\n<]+)/)?.[1]?.trim().toLowerCase();
+    const acctType: QfxFileMeta['acctType'] = isCredit
+      ? 'credit'
+      : acctTypeRaw === 'savings' ? 'savings' : 'checking';
+    const lastFour = acctId.slice(-4);
+    return { filepath, acctId, acctType, lastFour };
+  });
 }

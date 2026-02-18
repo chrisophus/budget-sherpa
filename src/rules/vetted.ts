@@ -10,7 +10,9 @@ export class VettedRuleStore {
     this.path = path;
     this.store = existsSync(path)
       ? JSON.parse(readFileSync(path, 'utf-8'))
-      : { version: 1, rules: {} };
+      : { version: 1, rules: {}, tags: {} };
+    // Migrate old stores without tags field
+    if (!this.store.tags) this.store.tags = {};
   }
 
   isVetted(key: string): boolean {
@@ -45,6 +47,20 @@ export class VettedRuleStore {
 
   getSessionRules(): VettedRule[] {
     return [...this.sessionKeys].map(k => this.store.rules[k]).filter(Boolean);
+  }
+
+  // Tag persistence — keyed by clean payee name
+  hasTag(cleanPayee: string): boolean {
+    return cleanPayee in this.store.tags;
+  }
+
+  getTag(cleanPayee: string): string | null {
+    return this.store.tags[cleanPayee] ?? null;
+  }
+
+  setTag(cleanPayee: string, tag: string | null): void {
+    this.store.tags[cleanPayee] = tag;
+    this.save();
   }
 
   private save(): void {

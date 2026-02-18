@@ -8,13 +8,14 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-import { parseQfxFiles } from './parsers/qfx.js';
+import { parseQfxFiles, parseQfxMeta } from './parsers/qfx.js';
 import { ActualClient } from './actual/client.js';
 import { AnthropicAdapter } from './llm/anthropic.js';
 import { VettedRuleStore } from './rules/vetted.js';
-import { vetPayeeRule, vetCategoryRule } from './ui/vetting.js';
+import { vetPayeeRule, vetCategoryRule, vetTag } from './ui/vetting.js';
 import { runEndOfSession } from './ui/session.js';
-import type { Config, RawTransaction } from './types.js';
+import { input, select } from '@inquirer/prompts';
+import type { Config } from './types.js';
 
 // --- Config ---
 
@@ -59,6 +60,7 @@ if (qfxFiles.length === 0) {
 console.log(chalk.bold('\n🏔  Budget Sherpa\n'));
 console.log(`Found ${qfxFiles.length} QFX file(s)`);
 
+const qfxMeta = parseQfxMeta(qfxFiles);
 const transactions = parseQfxFiles(qfxFiles);
 console.log(`Parsed ${transactions.length} transactions\n`);
 
@@ -66,11 +68,52 @@ console.log(`Parsed ${transactions.length} transactions\n`);
 const actual = new ActualClient();
 await actual.init(config.actualServerUrl, config.actualPassword, config.actualBudgetId);
 
-const [rules, payees, categories] = await Promise.all([
+const [rules, payees, categories, existingAccounts] = await Promise.all([
   actual.getRules(),
   actual.getPayees(),
   actual.getCategories(),
+  actual.getAccounts(),
 ]);
+
+// ── Account detection / creation ──────────────────────────────────────────────
+
+const accountMapping = new Map<string, string>(); // qfxAcctId → actualAccountId
+const accountsByName = new Map(existingAccounts.map(a => [a.name.toLowerCase(), a.id]));
+
+for (const meta of qfxMeta) {
+  console.log(chalk.bold(`── Account: …${meta.lastFour} (${meta.acctType}) ──────────────────`));
+
+  if (existingAccounts.length > 0) {
+    // Let user pick an existing account or create new
+    const choices = [
+      ...existingAccounts.map(a => ({ name: a.name, value: a.id })),
+      { name: '+ Create new account', value: '__new__' },
+    ];
+    const choice = await select({
+      message: `Map QFX account "${meta.acctId}" to:`,
+      choices,
+    });
+
+    if (choice !== '__new__') {
+      accountMapping.set(meta.acctId, choice);
+      const name = existingAccounts.find(a => a.id === choice)?.name;
+      console.log(chalk.green(`✓ Mapped to "${name}"`));
+      continue;
+    }
+  }
+
+  // Create new account
+  const name = await input({
+    message: `Name for this ${meta.acctType} account:`,
+    default: `Chase ${meta.lastFour}`,
+  });
+  const id = await actual.createAccount({ name, type: meta.acctType });
+  existingAccounts.push({ id, name });
+  accountMapping.set(meta.acctId, id);
+  console.log(chalk.green(`✓ Created account "${name}"`));
+}
+
+// ── Vetting setup ─────────────────────────────────────────────────────────────
 
 const knownPayeeNames = payees.map(p => p.name);
 const categoryNames = categories.map(c => c.name);
@@ -81,20 +124,19 @@ const llm = new AnthropicAdapter(config.anthropicApiKey);
 const vetted = new VettedRuleStore(config.vettedRulesPath);
 
 // Group transactions by raw payee
-const byRawPayee = new Map<string, RawTransaction[]>();
+const byRawPayee = new Map<string, typeof transactions>();
 for (const tx of transactions) {
   if (!byRawPayee.has(tx.rawPayee)) byRawPayee.set(tx.rawPayee, []);
   byRawPayee.get(tx.rawPayee)!.push(tx);
 }
 
 const uniquePayees = [...byRawPayee.keys()];
-console.log(`${uniquePayees.length} unique raw payees to process\n`);
+console.log(`\n${uniquePayees.length} unique raw payees to process\n`);
 
-// ── Per-payee: clean then categorize ─────────────────────────────────
+// ── Per-payee: clean → categorize → tag ──────────────────────────────────────
 
 const payeeMap = new Map<string, string>();    // rawPayee → cleanPayee
-const categoryMap = new Map<string, string>(); // cleanPayee → category
-const vettedCleanPayees = new Set<string>();   // avoid re-prompting category for shared clean names
+const vettedCleanPayees = new Set<string>();   // avoid re-prompting for shared clean names
 
 try {
   for (const rawPayee of uniquePayees) {
@@ -108,11 +150,11 @@ try {
     payeeMap.set(rawPayee, cleanPayee);
     if (!knownPayeeNames.includes(cleanPayee)) knownPayeeNames.push(cleanPayee);
 
-    // Stage 2: assign category (only once per unique clean payee)
+    // Stages 2 + 3: category and tag (only once per unique clean payee)
     if (!vettedCleanPayees.has(cleanPayee)) {
       vettedCleanPayees.add(cleanPayee);
-      const categoryResult = await vetCategoryRule(cleanPayee, rules, vetted, llm, categoryNames, categoryById);
-      if (categoryResult) categoryMap.set(cleanPayee, categoryResult.category);
+      await vetCategoryRule(cleanPayee, rules, vetted, llm, categoryNames, categoryById);
+      await vetTag(cleanPayee, vetted);
     }
   }
 } catch (err: any) {
@@ -128,11 +170,12 @@ try {
 console.log(chalk.bold('\n── Vetting Summary ──────────────────────────'));
 console.log(`Transactions:  ${transactions.length}`);
 console.log(`Payees mapped: ${payeeMap.size} / ${uniquePayees.length}`);
-console.log(`Categorized:   ${categoryMap.size} clean payees`);
 
 // ── End-of-session: review rules + import ────────────────────────────────────
+const tagLookup = (cleanPayee: string) => vetted.getTag(cleanPayee);
+
 try {
-  await runEndOfSession(vetted.getSessionRules(), transactions, payeeMap, categoryMap, actual);
+  await runEndOfSession(vetted.getSessionRules(), transactions, payeeMap, tagLookup, accountMapping, actual);
 } catch (err: any) {
   if (err?.name !== 'ExitPromptError') throw err;
 }
