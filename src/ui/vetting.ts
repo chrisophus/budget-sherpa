@@ -13,12 +13,19 @@ export async function vetPayeeRule(
   vetted: VettedRuleStore,
   llm: LLMAdapter,
   knownPayees: string[],
+  payeeById: Map<string, string>,
 ): Promise<{ cleanPayee: string; rule: VettedRule } | null> {
+
+  // Check vetted store first (handles restarts for locally-created rules)
+  const vettedByPayee = vetted.findPayeeRule(rawPayee);
+  if (vettedByPayee) {
+    return { cleanPayee: vettedByPayee.actionValue, rule: vettedByPayee };
+  }
 
   const matchedRule = findPreRule(rules, sampleTxs[0]);
   const key = matchedRule ? ruleKey(matchedRule) : null;
 
-  // Already vetted — silent pass
+  // Already vetted via Actual Budget rule key
   if (key && vetted.isVetted(key)) {
     return { cleanPayee: vetted.get(key)!.actionValue, rule: vetted.get(key)! };
   }
@@ -27,9 +34,13 @@ export async function vetPayeeRule(
   console.log(chalk.dim('Raw payee:   ') + chalk.yellow(rawPayee));
   console.log(chalk.dim('Occurrences: ') + sampleTxs.length);
 
+  // Resolve UUID → name if the matched rule stores a payee ID
+  const rawValue = matchedRule?.actions.find(a => a.field === 'payee')?.value ?? rawPayee;
+  const resolvedValue = payeeById.get(rawValue) ?? rawValue;
+
   // Propose a clean name
   let proposed = matchedRule
-    ? matchedRule.actions.find(a => a.field === 'payee')?.value ?? rawPayee
+    ? resolvedValue
     : await llm.proposePayee(rawPayee, knownPayees);
 
   console.log(chalk.dim('Proposed:    ') + chalk.cyan(proposed));
@@ -77,12 +88,19 @@ export async function vetCategoryRule(
   vetted: VettedRuleStore,
   llm: LLMAdapter,
   categories: string[],
+  categoryById: Map<string, string>,
 ): Promise<{ category: string; rule: VettedRule } | null> {
+
+  // Check vetted store first (handles restarts for locally-created rules)
+  const vettedByPayee = vetted.findCategoryRule(cleanPayee);
+  if (vettedByPayee) {
+    return { category: vettedByPayee.actionValue, rule: vettedByPayee };
+  }
 
   const matchedRule = findCategoryRule(rules, cleanPayee);
   const key = matchedRule ? ruleKey(matchedRule) : null;
 
-  // Already vetted — silent pass
+  // Already vetted via Actual Budget rule key
   if (key && vetted.isVetted(key)) {
     return { category: vetted.get(key)!.actionValue, rule: vetted.get(key)! };
   }
@@ -90,8 +108,12 @@ export async function vetCategoryRule(
   console.log(chalk.bold('── Category Rule ───────────────────────────'));
   console.log(chalk.dim('Payee: ') + chalk.cyan(cleanPayee));
 
+  // Resolve UUID → name if the matched rule stores a category ID
+  const rawValue = matchedRule?.actions.find(a => a.field === 'category')?.value ?? '';
+  const resolvedValue = categoryById.get(rawValue) ?? rawValue;
+
   let proposed = matchedRule
-    ? matchedRule.actions.find(a => a.field === 'category')?.value ?? ''
+    ? resolvedValue
     : await llm.proposeCategory(cleanPayee, categories);
 
   console.log(chalk.dim('Proposed category: ') + chalk.magenta(proposed));

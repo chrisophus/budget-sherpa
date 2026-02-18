@@ -32,6 +32,18 @@ export class ActualClient {
     return api.getBudgets() as any;
   }
 
+  async getAccounts(): Promise<Array<{ id: string; name: string }>> {
+    return api.getAccounts() as any;
+  }
+
+  async createPayee(name: string): Promise<string> {
+    return api.createPayee({ name }) as any;
+  }
+
+  async addTransactions(accountId: string, transactions: any[]): Promise<{ added: string[]; updated: string[] }> {
+    return api.addTransactions(accountId, transactions) as any;
+  }
+
   async shutdown(): Promise<void> {
     if (this.initialized) await api.shutdown();
   }

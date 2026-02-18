@@ -3,11 +3,17 @@ import { readdirSync } from 'fs';
 import { resolve } from 'path';
 import chalk from 'chalk';
 
+process.on('SIGINT', () => {
+  console.log(chalk.yellow('\n\nProgress saved. Goodbye!'));
+  process.exit(0);
+});
+
 import { parseQfxFiles } from './parsers/qfx.js';
 import { ActualClient } from './actual/client.js';
 import { AnthropicAdapter } from './llm/anthropic.js';
 import { VettedRuleStore } from './rules/vetted.js';
 import { vetPayeeRule, vetCategoryRule } from './ui/vetting.js';
+import { runEndOfSession } from './ui/session.js';
 import type { Config, RawTransaction } from './types.js';
 
 // --- Config ---
@@ -68,6 +74,8 @@ const [rules, payees, categories] = await Promise.all([
 
 const knownPayeeNames = payees.map(p => p.name);
 const categoryNames = categories.map(c => c.name);
+const categoryById = new Map(categories.map(c => [c.id, c.name]));
+const payeeById = new Map(payees.map(p => [p.id, p.name]));
 
 const llm = new AnthropicAdapter(config.anthropicApiKey);
 const vetted = new VettedRuleStore(config.vettedRulesPath);
@@ -82,43 +90,52 @@ for (const tx of transactions) {
 const uniquePayees = [...byRawPayee.keys()];
 console.log(`${uniquePayees.length} unique raw payees to process\n`);
 
-// ── Stage 1: Payee cleaning ──────────────────────────────────────────
-console.log(chalk.bold.blue('Stage 1: Payee cleaning\n'));
+// ── Per-payee: clean then categorize ─────────────────────────────────
 
-const payeeMap = new Map<string, string>(); // rawPayee → cleanPayee
+const payeeMap = new Map<string, string>();    // rawPayee → cleanPayee
+const categoryMap = new Map<string, string>(); // cleanPayee → category
+const vettedCleanPayees = new Set<string>();   // avoid re-prompting category for shared clean names
 
-for (const rawPayee of uniquePayees) {
-  const txs = byRawPayee.get(rawPayee)!;
-  const result = await vetPayeeRule(rawPayee, txs, rules, vetted, llm, knownPayeeNames);
-  if (result) {
-    payeeMap.set(rawPayee, result.cleanPayee);
-    if (!knownPayeeNames.includes(result.cleanPayee)) {
-      knownPayeeNames.push(result.cleanPayee);
+try {
+  for (const rawPayee of uniquePayees) {
+    const txs = byRawPayee.get(rawPayee)!;
+
+    // Stage 1: clean the raw payee
+    const payeeResult = await vetPayeeRule(rawPayee, txs, rules, vetted, llm, knownPayeeNames, payeeById);
+    if (!payeeResult) continue;
+
+    const { cleanPayee } = payeeResult;
+    payeeMap.set(rawPayee, cleanPayee);
+    if (!knownPayeeNames.includes(cleanPayee)) knownPayeeNames.push(cleanPayee);
+
+    // Stage 2: assign category (only once per unique clean payee)
+    if (!vettedCleanPayees.has(cleanPayee)) {
+      vettedCleanPayees.add(cleanPayee);
+      const categoryResult = await vetCategoryRule(cleanPayee, rules, vetted, llm, categoryNames, categoryById);
+      if (categoryResult) categoryMap.set(cleanPayee, categoryResult.category);
     }
+  }
+} catch (err: any) {
+  if (err?.name === 'ExitPromptError') {
+    console.log(chalk.yellow('\n\nProgress saved.'));
+  } else {
+    await actual.shutdown();
+    throw err;
   }
 }
 
-// ── Stage 2: Category assignment ─────────────────────────────────────
-console.log(chalk.bold.blue('\nStage 2: Category assignment\n'));
-
-// Group by clean payee (many raw payees may share a clean payee)
-const byCleanPayee = new Map<string, RawTransaction[]>();
-for (const [rawPayee, cleanPayee] of payeeMap) {
-  if (!byCleanPayee.has(cleanPayee)) byCleanPayee.set(cleanPayee, []);
-  byCleanPayee.get(cleanPayee)!.push(...byRawPayee.get(rawPayee)!);
-}
-
-const categoryMap = new Map<string, string>(); // cleanPayee → category
-
-for (const cleanPayee of byCleanPayee.keys()) {
-  const result = await vetCategoryRule(cleanPayee, rules, vetted, llm, categoryNames);
-  if (result) categoryMap.set(cleanPayee, result.category);
-}
-
-// ── Summary ──────────────────────────────────────────────────────────
-console.log(chalk.bold.green('\n── Summary ─────────────────────────────────'));
+// ── Vetting summary ───────────────────────────────────────────────────────────
+console.log(chalk.bold('\n── Vetting Summary ──────────────────────────'));
 console.log(`Transactions:  ${transactions.length}`);
 console.log(`Payees mapped: ${payeeMap.size} / ${uniquePayees.length}`);
 console.log(`Categorized:   ${categoryMap.size} clean payees`);
 
+// ── End-of-session: review rules + import ────────────────────────────────────
+try {
+  await runEndOfSession(vetted.getSessionRules(), transactions, payeeMap, categoryMap, actual);
+} catch (err: any) {
+  if (err?.name !== 'ExitPromptError') throw err;
+}
+
 await actual.shutdown();
+console.log(chalk.bold.green('\nGoodbye!'));
