@@ -2,6 +2,7 @@ import { select, confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { VettedRule, RawTransaction } from '../types.js';
 import type { ActualClient } from '../actual/client.js';
+import { detectAndLinkTransfers } from './transfers.js';
 
 // ── Rule creation ─────────────────────────────────────────────────────────────
 
@@ -153,6 +154,7 @@ export async function runEndOfSession(
   tagLookup: (cleanPayee: string) => string | null,
   accountMapping: Map<string, string>,
   actual: ActualClient,
+  skipTransferDetection = false,
 ): Promise<void> {
   console.log('\n' + chalk.bold('── End of Session ───────────────────────────'));
 
@@ -207,5 +209,11 @@ export async function runEndOfSession(
 
   if (doImport) {
     await importTransactions(transactions, payeeMap, tagLookup, accountMapping, actual);
+
+    // Transfer detection — find and link paired transactions across accounts
+    if (!skipTransferDetection && accountMapping.size > 1) {
+      console.log('\n' + chalk.bold('── Transfer Detection ───────────────────────'));
+      await detectAndLinkTransfers(accountMapping, actual);
+    }
   }
 }

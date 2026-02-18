@@ -2,6 +2,20 @@ import * as api from '@actual-app/api';
 import { mkdirSync, rmSync, readdirSync } from 'fs';
 import type { Rule } from '../types.js';
 
+// Suppress verbose background-sync noise from @actual-app/api.
+// The library logs these to stdout on every sync cycle; they're not useful to end users.
+const SUPPRESSED = [
+  /^Syncing since /,
+  /^Got messages from server /,
+  /^Making backup/,
+  /^Loaded budget /,
+];
+const _log = console.log.bind(console);
+console.log = (...args: any[]) => {
+  if (args.length > 0 && typeof args[0] === 'string' && SUPPRESSED.some(r => r.test(args[0]))) return;
+  _log(...args);
+};
+
 export class ActualClient {
   private initialized = false;
 
@@ -60,6 +74,14 @@ export class ActualClient {
 
   async importTransactions(accountId: string, transactions: any[]): Promise<{ added: string[]; updated: string[]; errors: any[] }> {
     return api.importTransactions(accountId, transactions) as any;
+  }
+
+  async getTransactions(accountId: string, startDate = '2000-01-01', endDate = '2099-12-31'): Promise<any[]> {
+    return api.getTransactions(accountId, startDate, endDate) as any;
+  }
+
+  async updateTransaction(id: string, fields: any): Promise<void> {
+    return api.updateTransaction(id, fields) as any;
   }
 
   async sync(): Promise<void> {
