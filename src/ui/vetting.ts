@@ -2,6 +2,7 @@ import { input, select } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { RawTransaction, Rule, VettedRule, LLMAdapter } from '../types.js';
 import { ruleKey, findPreRule, findCategoryRule } from '../rules/engine.js';
+import { extractMatchValue } from '../rules/normalize.js';
 import type { VettedRuleStore } from '../rules/vetted.js';
 
 // --- Stage 1: Payee cleaning ---
@@ -43,38 +44,50 @@ export async function vetPayeeRule(
     ? resolvedValue
     : await llm.proposePayee(rawPayee, knownPayees);
 
+  // Derive the stable match pattern (strip variable trailing codes)
+  // Use the existing rule's condition value if available; otherwise heuristic-strip the raw payee
+  let matchValue = matchedRule
+    ? (matchedRule.conditions.find(c => c.field === 'imported_payee')?.value ?? rawPayee)
+    : extractMatchValue(rawPayee);
+
+  console.log(chalk.dim('Match pattern:') + ' ' + chalk.yellow(matchValue));
   console.log(chalk.dim('Proposed:    ') + chalk.cyan(proposed));
   if (matchedRule) console.log(chalk.dim('(from existing unvetted rule)'));
 
   while (true) {
     const action = await select({
-      message: 'Accept this payee name?',
+      message: 'Accept?',
       choices: [
         { name: `Accept "${proposed}"`, value: 'accept' },
-        { name: 'Edit', value: 'edit' },
+        { name: 'Edit name', value: 'edit-name' },
+        { name: 'Edit match pattern', value: 'edit-match' },
         { name: 'Skip (no rule)', value: 'skip' },
       ],
     });
 
     if (action === 'skip') return null;
 
-    if (action === 'edit') {
+    if (action === 'edit-name') {
       proposed = await input({ message: 'Clean payee name:', default: proposed });
     }
 
-    if (action === 'accept' || action === 'edit') {
+    if (action === 'edit-match') {
+      matchValue = await input({ message: 'Match pattern (contains):', default: matchValue });
+    }
+
+    if (action === 'accept' || action === 'edit-name' || action === 'edit-match') {
       const vettedRule: VettedRule = {
-        key: key ?? `pre:imported_payee:contains:${rawPayee}:payee:${proposed}`,
+        key: key ?? `pre:imported_payee:contains:${matchValue}:payee:${proposed}`,
         stage: 'pre',
         matchField: 'imported_payee',
         matchOp: 'contains',
-        matchValue: rawPayee,
+        matchValue,
         actionField: 'payee',
         actionValue: proposed,
         vettedAt: new Date().toISOString(),
       };
       vetted.approve(vettedRule);
-      console.log(chalk.green(`✓ Approved: "${rawPayee}" → "${proposed}"`));
+      console.log(chalk.green(`✓ Approved: "${matchValue}" → "${proposed}"`));
       return { cleanPayee: proposed, rule: vettedRule };
     }
   }
