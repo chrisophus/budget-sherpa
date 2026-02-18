@@ -78,7 +78,7 @@ async function createRulesInActual(
           stage: null,
           conditionsOp: 'and',
           conditions: [condition],
-          actions: [{ op: 'set', field: 'notes', value: `#${tag}`, type: 'string' as any }],
+          actions: [{ op: 'append-notes', field: 'notes', value: `#${tag}`, type: 'string' }],
         });
         created++;
         console.log(chalk.green(`  ✓ [tag] ${rule.matchValue} → #${tag}`));

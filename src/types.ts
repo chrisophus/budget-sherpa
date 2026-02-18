@@ -40,10 +40,10 @@ export interface Condition {
 }
 
 export interface Action {
-  op: 'set';
+  op: 'set' | 'append-notes' | 'prepend-notes';
   field: ActionField;
   value: string;
-  type: 'id';
+  type: 'id' | 'string';
 }
 
 export interface Rule {
