@@ -1,5 +1,5 @@
 import * as api from '@actual-app/api';
-import { mkdirSync } from 'fs';
+import { mkdirSync, rmSync } from 'fs';
 import type { Rule } from '../types.js';
 
 export class ActualClient {
@@ -8,7 +8,21 @@ export class ActualClient {
   async init(serverUrl: string, password: string, budgetId: string, dataDir = './data'): Promise<void> {
     mkdirSync(dataDir, { recursive: true });
     await api.init({ serverURL: serverUrl, password, dataDir });
-    await api.downloadBudget(budgetId);
+    try {
+      await api.downloadBudget(budgetId);
+    } catch (err: any) {
+      if (err?.reason === 'file-has-reset' || err?.message?.includes('file-has-reset')) {
+        // Server budget was reset — local cache is stale. Wipe and re-download.
+        console.error('Budget was reset on server, clearing local cache and re-downloading...');
+        await api.shutdown();
+        rmSync(dataDir, { recursive: true, force: true });
+        mkdirSync(dataDir, { recursive: true });
+        await api.init({ serverURL: serverUrl, password, dataDir });
+        await api.downloadBudget(budgetId);
+      } else {
+        throw err;
+      }
+    }
     this.initialized = true;
   }
 
