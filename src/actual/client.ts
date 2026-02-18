@@ -62,7 +62,14 @@ export class ActualClient {
     return api.importTransactions(accountId, transactions) as any;
   }
 
+  async sync(): Promise<void> {
+    if (this.initialized) await api.sync();
+  }
+
   async shutdown(): Promise<void> {
-    if (this.initialized) await api.shutdown();
+    if (this.initialized) {
+      await api.sync();
+      await api.shutdown();
+    }
   }
 }
