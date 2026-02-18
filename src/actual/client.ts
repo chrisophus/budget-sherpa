@@ -1,5 +1,5 @@
 import * as api from '@actual-app/api';
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, rmSync, readdirSync } from 'fs';
 import type { Rule } from '../types.js';
 
 export class ActualClient {
@@ -11,17 +11,17 @@ export class ActualClient {
     try {
       await api.downloadBudget(budgetId);
     } catch (err: any) {
-      if (err?.reason === 'file-has-reset' || err?.message?.includes('file-has-reset')) {
-        // Server budget was reset — local cache is stale. Wipe and re-download.
-        console.error('Budget was reset on server, clearing local cache and re-downloading...');
-        await api.shutdown();
-        rmSync(dataDir, { recursive: true, force: true });
-        mkdirSync(dataDir, { recursive: true });
-        await api.init({ serverURL: serverUrl, password, dataDir });
-        await api.downloadBudget(budgetId);
-      } else {
-        throw err;
-      }
+      // If download fails and there's a local cache, it may be stale (e.g. budget was
+      // reset on the server). Clear it and retry once — the cache is just a mirror so
+      // clearing it is always safe. Re-throw if the retry also fails.
+      const hasCache = readdirSync(dataDir).length > 0;
+      if (!hasCache) throw err;
+      console.error('Budget download failed with local cache present — clearing cache and retrying...');
+      await api.shutdown();
+      rmSync(dataDir, { recursive: true, force: true });
+      mkdirSync(dataDir, { recursive: true });
+      await api.init({ serverURL: serverUrl, password, dataDir });
+      await api.downloadBudget(budgetId);
     }
     this.initialized = true;
   }
