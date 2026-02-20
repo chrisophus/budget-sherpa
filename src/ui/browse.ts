@@ -65,10 +65,27 @@ export async function browseAndVet(
 
   // ── Phase 1: compute clean-name proposals in parallel ───────────────────────
 
-  console.log(chalk.dim('\nComputing proposals…'));
-
   type RawMeta = { matchValue: string; cleanPayee: string; preRuleKey: string; wasVetted: boolean };
   const rawMeta = new Map<string, RawMeta>();
+
+  let p1done = 0, p1vetted = 0, p1llm = 0, p1llmDone = 0;
+  const p1total = uniqueRawPayees.length;
+
+  // First pass: count how many need LLM calls (fast, no I/O)
+  for (const rawPayee of uniqueRawPayees) {
+    const txs = byRawPayee.get(rawPayee)!;
+    const matchedRule = findPreRule(rules, txs[0]);
+    const key = matchedRule ? ruleKey(matchedRule) : null;
+    const needsLlm = !vetted.findPayeeRule(rawPayee) && !(key && vetted.isVetted(key));
+    if (needsLlm) p1llm++;
+  }
+
+  const p1label = () => {
+    const vetStr = chalk.dim(`${p1vetted} vetted`);
+    const llmStr = chalk.dim(`${p1llmDone}/${p1llm} LLM`);
+    return chalk.dim(`Computing clean names… ${p1done}/${p1total}  (${vetStr}, ${llmStr})`);
+  };
+  process.stdout.write('\n' + p1label());
 
   await withConcurrency(uniqueRawPayees, LLM_CONCURRENCY, async (rawPayee) => {
     const txs = byRawPayee.get(rawPayee)!;
@@ -78,29 +95,31 @@ export async function browseAndVet(
     const vettedByPayee = vetted.findPayeeRule(rawPayee);
     if (vettedByPayee) {
       rawMeta.set(rawPayee, { matchValue: vettedByPayee.matchValue, cleanPayee: vettedByPayee.actionValue, preRuleKey: vettedByPayee.key, wasVetted: true });
-      return;
-    }
-
-    if (key && vetted.isVetted(key)) {
+      p1vetted++;
+    } else if (key && vetted.isVetted(key)) {
       const stored = vetted.get(key)!;
       rawMeta.set(rawPayee, { matchValue: stored.matchValue, cleanPayee: stored.actionValue, preRuleKey: key, wasVetted: true });
-      return;
+      p1vetted++;
+    } else {
+      const rawValue = matchedRule?.actions.find(a => a.field === 'payee')?.value ?? rawPayee;
+      const resolvedValue = payeeById.get(rawValue) ?? rawValue;
+      const matchValue = matchedRule
+        ? (matchedRule.conditions.find(c => c.field === 'imported_payee')?.value ?? rawPayee)
+        : extractMatchValue(rawPayee);
+      const cleanPayee = matchedRule ? resolvedValue : await llm.proposePayee(rawPayee, knownPayeeNames);
+      rawMeta.set(rawPayee, {
+        matchValue,
+        cleanPayee,
+        preRuleKey: key ?? `pre:imported_payee:contains:${matchValue}:payee:${cleanPayee}`,
+        wasVetted: false,
+      });
+      p1llmDone++;
     }
 
-    const rawValue = matchedRule?.actions.find(a => a.field === 'payee')?.value ?? rawPayee;
-    const resolvedValue = payeeById.get(rawValue) ?? rawValue;
-    const matchValue = matchedRule
-      ? (matchedRule.conditions.find(c => c.field === 'imported_payee')?.value ?? rawPayee)
-      : extractMatchValue(rawPayee);
-    const cleanPayee = matchedRule ? resolvedValue : await llm.proposePayee(rawPayee, knownPayeeNames);
-
-    rawMeta.set(rawPayee, {
-      matchValue,
-      cleanPayee,
-      preRuleKey: key ?? `pre:imported_payee:contains:${matchValue}:payee:${cleanPayee}`,
-      wasVetted: false,
-    });
+    p1done++;
+    process.stdout.write('\r' + p1label());
   });
+  process.stdout.write('\n');
 
   // ── Group by matchValue (one row = one pre-rule) ─────────────────────────────
 
@@ -132,9 +151,17 @@ export async function browseAndVet(
   // ── Phase 2: category proposals for new rows (parallel) ─────────────────────
 
   const newRows = [...rowsByMatch.values()].filter(r => !r.wasVetted && r.category === null);
-  await withConcurrency(newRows, LLM_CONCURRENCY, async row => {
-    row.category = (await llm.proposeCategory(row.cleanPayee, categoryNames)) || null;
-  });
+  let p2done = 0;
+  const p2total = newRows.length;
+  if (p2total > 0) {
+    process.stdout.write(chalk.dim(`Computing categories… 0/${p2total}`));
+    await withConcurrency(newRows, LLM_CONCURRENCY, async row => {
+      row.category = (await llm.proposeCategory(row.cleanPayee, categoryNames)) || null;
+      p2done++;
+      process.stdout.write(`\r${chalk.dim(`Computing categories… ${p2done}/${p2total}`)}`);
+    });
+    process.stdout.write('\n');
+  }
 
   const rows = [...rowsByMatch.values()];
 
