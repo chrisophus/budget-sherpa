@@ -279,6 +279,7 @@ export async function browseAndVet(
   console.log(chalk.dim('  ✎ = edited this session   · = previously vetted   ✗ = skipped\n'));
 
   let quit = false;
+  let lastChosen: string | undefined;
 
   while (true) {
     const choices = [
@@ -291,10 +292,13 @@ export async function browseAndVet(
       message: 'Select a payee to edit:',
       choices,
       pageSize: 20,
+      default: lastChosen,
     });
 
     if (chosen === '__done__') break;
     if (chosen === '__quit__') { quit = true; break; }
+
+    lastChosen = chosen;
 
     const row = rows[parseInt(chosen, 10)];
     row.touched = true;
