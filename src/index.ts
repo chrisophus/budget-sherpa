@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import { parseQfxFiles, parseQfxMeta } from './parsers/qfx.js';
 import { ActualClient } from './actual/client.js';
 import { AnthropicAdapter } from './llm/anthropic.js';
+import { OpenAIAdapter } from './llm/openai.js';
 import { VettedRuleStore } from './rules/vetted.js';
 import { runEndOfSession } from './ui/session.js';
 import { browseAndVet } from './ui/browse.js';
@@ -20,12 +21,32 @@ function loadConfig(): Config {
     if (!val) throw new Error(`Missing required env var: ${key}`);
     return val;
   };
+
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  const openaiApiKey = process.env.OPENAI_API_KEY;
+
+  let llmProvider = process.env.LLM_PROVIDER as 'anthropic' | 'openai' | undefined;
+  if (!llmProvider) {
+    if (anthropicApiKey) llmProvider = 'anthropic';
+    else if (openaiApiKey) llmProvider = 'openai';
+    else throw new Error('Missing LLM API key: set ANTHROPIC_API_KEY or OPENAI_API_KEY');
+  }
+
+  if (llmProvider === 'anthropic' && !anthropicApiKey) {
+    throw new Error('LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set');
+  }
+  if (llmProvider === 'openai' && !openaiApiKey) {
+    throw new Error('LLM_PROVIDER=openai but OPENAI_API_KEY is not set');
+  }
+
   return {
     actualServerUrl:  required('ACTUAL_SERVER_URL'),
     actualPassword:   required('ACTUAL_PASSWORD'),
     actualBudgetId:   required('ACTUAL_BUDGET_ID'),
     actualCaCert:     process.env.ACTUAL_CA_CERT,
-    anthropicApiKey:  required('ANTHROPIC_API_KEY'),
+    llmProvider,
+    anthropicApiKey,
+    openaiApiKey,
     vettedRulesPath:  process.env.VETTED_RULES_PATH ?? './vetted-rules.json',
   };
 }
@@ -70,7 +91,9 @@ const [rules, payees, categories, existingAccounts] = await Promise.all([
   actual.getAccounts(),
 ]);
 
-const llm = new AnthropicAdapter(config.anthropicApiKey);
+const llm = config.llmProvider === 'openai'
+  ? new OpenAIAdapter(config.openaiApiKey!)
+  : new AnthropicAdapter(config.anthropicApiKey!);
 const vetted = new VettedRuleStore(config.vettedRulesPath);
 
 // Wrap all interactive work in one try/catch so Ctrl+C anywhere

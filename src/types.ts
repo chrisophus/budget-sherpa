@@ -107,6 +107,8 @@ export interface Config {
   actualPassword: string;
   actualBudgetId: string;
   actualCaCert?: string;
-  anthropicApiKey: string;
+  llmProvider: 'anthropic' | 'openai';
+  anthropicApiKey?: string;
+  openaiApiKey?: string;
   vettedRulesPath: string;
 }
