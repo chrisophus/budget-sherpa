@@ -1,6 +1,6 @@
 import { select, input } from '@inquirer/prompts';
 import chalk from 'chalk';
-import type { Rule, RawTransaction, VettedRule, LLMAdapter } from '../types.js';
+import type { Rule, RawTransaction, VettedRule, LLMAdapter, Suggestion } from '../types.js';
 import type { VettedRuleStore } from '../rules/vetted.js';
 import { findPreRule, ruleKey } from '../rules/engine.js';
 import { extractMatchValue } from '../rules/normalize.js';
@@ -50,6 +50,92 @@ function rowLabel(row: PayeeRow): string {
   if (row.touched)  return chalk.green('✎ ') + body;
   if (row.wasVetted) return chalk.dim('· ') + chalk.dim(body);
   return '  ' + body;
+}
+
+async function applySuggestions(
+  suggestions: Suggestion[],
+  rows: PayeeRow[],
+  byRawPayee: Map<string, RawTransaction[]>,
+): Promise<void> {
+  console.log(chalk.bold(`\n── AI Review: ${suggestions.length} suggestion(s) ─────────────────`));
+
+  for (const s of suggestions) {
+    const row = rows.find(r => r.cleanPayee.toLowerCase() === s.cleanPayee.toLowerCase());
+    if (!row) continue;
+
+    console.log('');
+
+    const typeLabel: Record<string, string> = {
+      split:    chalk.yellow('[SPLIT]'),
+      rename:   chalk.blue('[RENAME]'),
+      category: chalk.magenta('[CATEGORY]'),
+      flag:     chalk.red('[FLAG]'),
+    };
+    console.log(`${typeLabel[s.type] ?? s.type}  ${chalk.bold(s.cleanPayee)}`);
+    console.log(chalk.dim('  ' + s.reason));
+
+    if (s.type === 'split' && s.rawPayees?.length) {
+      console.log(chalk.dim('  Split off: ') + s.rawPayees.join(', '));
+      if (s.suggestedName)     console.log(chalk.dim('  New name:  ') + chalk.cyan(s.suggestedName));
+      if (s.suggestedCategory) console.log(chalk.dim('  Category:  ') + chalk.magenta(s.suggestedCategory));
+    }
+    if (s.type === 'rename' && s.suggestedName)
+      console.log(chalk.dim('  Rename to: ') + chalk.cyan(s.suggestedName));
+    if (s.type === 'category' && s.suggestedCategory)
+      console.log(chalk.dim('  Category:  ') + chalk.magenta(s.suggestedCategory));
+
+    const action = await select({
+      message: 'Accept?',
+      choices: [
+        { name: 'Accept', value: 'accept' },
+        { name: 'Skip', value: 'skip' },
+      ],
+    });
+
+    if (action !== 'accept') continue;
+
+    if (s.type === 'split' && s.rawPayees?.length && s.suggestedName) {
+      const toSplit = new Set(s.rawPayees.map(r => r.toLowerCase()));
+      const removed = row.rawPayees.filter(r => toSplit.has(r.toLowerCase()));
+      if (removed.length === 0) { console.log(chalk.yellow('  ⚠ None of the listed raw payees found in group — skipped')); continue; }
+
+      row.rawPayees = row.rawPayees.filter(r => !toSplit.has(r.toLowerCase()));
+      row.txCount = row.rawPayees.reduce((n, r) => n + (byRawPayee.get(r)?.length ?? 0), 0);
+      row.touched = true;
+
+      const newMatchValue = extractMatchValue(removed[0]);
+      rows.push({
+        rawPayees: removed,
+        txCount: removed.reduce((n, r) => n + (byRawPayee.get(r)?.length ?? 0), 0),
+        matchValue: newMatchValue,
+        cleanPayee: s.suggestedName,
+        category: s.suggestedCategory ?? null,
+        tag: null,
+        tagDecided: false,
+        preRuleKey: `pre:imported_payee:contains:${newMatchValue}:payee:${s.suggestedName}`,
+        wasVetted: false,
+        touched: true,
+        skipped: false,
+      });
+      console.log(chalk.green(`  ✓ Split off ${removed.length} raw payee(s) → "${s.suggestedName}"`));
+    }
+
+    if (s.type === 'rename' && s.suggestedName) {
+      const old = row.cleanPayee;
+      row.cleanPayee = s.suggestedName;
+      row.preRuleKey = `pre:imported_payee:contains:${row.matchValue}:payee:${s.suggestedName}`;
+      row.touched = true;
+      console.log(chalk.green(`  ✓ Renamed "${old}" → "${s.suggestedName}"`));
+    }
+
+    if (s.type === 'category' && s.suggestedCategory) {
+      row.category = s.suggestedCategory;
+      row.touched = true;
+      console.log(chalk.green(`  ✓ Category → "${s.suggestedCategory}"`));
+    }
+
+    // 'flag' type: no automatic change, just shown for awareness
+  }
 }
 
 export async function browseAndVet(
@@ -164,6 +250,17 @@ export async function browseAndVet(
   }
 
   const rows = [...rowsByMatch.values()];
+
+  // ── Phase 2.5: AI grouping review ────────────────────────────────────────────
+
+  process.stdout.write(chalk.dim('Reviewing groupings for anomalies…'));
+  const groups = rows.map(r => ({ cleanPayee: r.cleanPayee, category: r.category, rawPayees: r.rawPayees }));
+  const suggestions = await llm.reviewGroupings(groups);
+  process.stdout.write('\r' + chalk.dim(`Reviewing groupings for anomalies… ${suggestions.length} suggestion(s) found.\n`));
+
+  if (suggestions.length > 0) {
+    await applySuggestions(suggestions, rows, byRawPayee);
+  }
 
   // ── Phase 3: browse loop ─────────────────────────────────────────────────────
 

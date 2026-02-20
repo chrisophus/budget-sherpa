@@ -77,9 +77,27 @@ export interface VettedStore {
 
 // --- LLM ---
 
+export interface GroupForReview {
+  cleanPayee: string;
+  category: string | null;
+  rawPayees: string[];
+}
+
+export type SuggestionType = 'split' | 'rename' | 'category' | 'flag';
+
+export interface Suggestion {
+  type: SuggestionType;
+  cleanPayee: string;          // current clean name this applies to
+  rawPayees?: string[];        // split: the specific raw payees to split off
+  suggestedName?: string;      // split/rename: new name
+  suggestedCategory?: string;  // split/category: new category
+  reason: string;
+}
+
 export interface LLMAdapter {
   proposePayee(rawPayee: string, knownPayees: string[]): Promise<string>;
   proposeCategory(cleanPayee: string, categories: string[]): Promise<string>;
+  reviewGroupings(groups: GroupForReview[]): Promise<Suggestion[]>;
 }
 
 // --- Config ---
