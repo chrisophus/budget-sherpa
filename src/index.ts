@@ -7,8 +7,8 @@ import { parseQfxFiles, parseQfxMeta } from './parsers/qfx.js';
 import { ActualClient } from './actual/client.js';
 import { AnthropicAdapter } from './llm/anthropic.js';
 import { VettedRuleStore } from './rules/vetted.js';
-import { vetPayeeRule, vetCategoryRule, vetTag } from './ui/vetting.js';
 import { runEndOfSession } from './ui/session.js';
+import { browseAndVet } from './ui/browse.js';
 import { input, select } from '@inquirer/prompts';
 import type { Config } from './types.js';
 
@@ -111,11 +111,10 @@ try {
     console.log(chalk.green(`✓ Created account "${name}"`));
   }
 
-  // ── Vetting setup ──────────────────────────────────────────────────────────
+  // ── Browse & vet ──────────────────────────────────────────────────────────
 
   const knownPayeeNames = payees.map(p => p.name);
   const categoryNames = categories.map(c => c.name);
-  const categoryById = new Map(categories.map(c => [c.id, c.name]));
   const payeeById = new Map(payees.map(p => [p.id, p.name]));
 
   // Group transactions by raw payee
@@ -126,32 +125,15 @@ try {
   }
 
   const uniquePayees = [...byRawPayee.keys()];
-  console.log(`\n${uniquePayees.length} unique raw payees to process\n`);
+  console.log(`\n${uniquePayees.length} unique raw payees`);
 
-  // ── Per-payee: clean → categorize → tag ───────────────────────────────────
+  const payeeMap = await browseAndVet(
+    uniquePayees, byRawPayee, rules, vetted, llm,
+    knownPayeeNames, categoryNames, payeeById,
+  );
 
-  const payeeMap = new Map<string, string>();    // rawPayee → cleanPayee
-  const vettedCleanPayees = new Set<string>();   // avoid re-prompting for shared clean names
-
-  for (const rawPayee of uniquePayees) {
-    const txs = byRawPayee.get(rawPayee)!;
-
-    const payeeResult = await vetPayeeRule(rawPayee, txs, rules, vetted, llm, knownPayeeNames, payeeById);
-    if (!payeeResult) continue;
-
-    const { cleanPayee } = payeeResult;
-    payeeMap.set(rawPayee, cleanPayee);
-    if (!knownPayeeNames.includes(cleanPayee)) knownPayeeNames.push(cleanPayee);
-
-    if (!vettedCleanPayees.has(cleanPayee)) {
-      vettedCleanPayees.add(cleanPayee);
-      await vetCategoryRule(cleanPayee, rules, vetted, llm, categoryNames, categoryById);
-      await vetTag(cleanPayee, vetted);
-    }
-  }
-
-  // ── Vetting summary ────────────────────────────────────────────────────────
-  console.log(chalk.bold('\n── Vetting Summary ──────────────────────────'));
+  // ── Summary ────────────────────────────────────────────────────────────────
+  console.log(chalk.bold('\n── Summary ───────────────────────────────────'));
   console.log(`Transactions:  ${transactions.length}`);
   console.log(`Payees mapped: ${payeeMap.size} / ${uniquePayees.length}`);
 
