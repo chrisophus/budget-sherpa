@@ -99,8 +99,16 @@ ${groupText}`,
       }],
     });
 
+    console.log('\n[debug] groups sent to LLM:\n' + groupText.slice(0, 2000));
+    console.log('[debug] stop_reason:', msg.stop_reason);
+    console.log('[debug] content blocks:', msg.content.map(b => b.type));
     const toolUse = msg.content.find(b => b.type === 'tool_use');
-    if (!toolUse || toolUse.type !== 'tool_use') return [];
-    return ((toolUse.input as any).suggestions as Suggestion[]) ?? [];
+    if (!toolUse || toolUse.type !== 'tool_use') {
+      console.log('[debug] no tool_use block — raw content:', JSON.stringify(msg.content, null, 2).slice(0, 1000));
+      return [];
+    }
+    const suggestions = ((toolUse.input as any).suggestions as Suggestion[]) ?? [];
+    console.log('[debug] suggestions:', JSON.stringify(suggestions, null, 2));
+    return suggestions;
   }
 }
