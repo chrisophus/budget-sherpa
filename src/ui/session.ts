@@ -253,6 +253,7 @@ async function importTransactions(
   transactions: RawTransaction[],
   payeeMap: Map<string, string>,
   tagLookup: (cleanPayee: string) => string | null,
+  categoryLookup: (cleanPayee: string) => string | null,
   accountMapping: Map<string, string>,
   actual: ActualClient,
 ): Promise<void> {
@@ -268,6 +269,8 @@ async function importTransactions(
     const payload = acctTxs.map(tx => {
       const cleanPayee = payeeMap.get(tx.rawPayee);
       const tag = cleanPayee ? tagLookup(cleanPayee) : null;
+      const categoryName = cleanPayee ? categoryLookup(cleanPayee) : null;
+      const categoryId = categoryName ? categoryIdByName.get(categoryName.toLowerCase()) : null;
 
       // Convert YYYYMMDD → YYYY-MM-DD
       const date = `${tx.date.slice(0, 4)}-${tx.date.slice(4, 6)}-${tx.date.slice(6, 8)}`;
@@ -280,6 +283,7 @@ async function importTransactions(
         imported_id: tx.id,
         imported_payee: tx.rawPayee,
         ...(cleanPayee ? { payee_name: cleanPayee } : {}),
+        ...(categoryId ? { category: categoryId } : {}),
         ...(tag ? { notes: `#${tag}` } : {}),
       };
     });
@@ -322,25 +326,33 @@ export async function runEndOfSession(
 
   // Re-read after potential edits
   const sessionRules = vetted.getSessionRules();
+  const allRules = vetted.getAllRules();
 
   // ── New rules ──────────────────────────────────────────────────────────────
-  if (sessionRules.length > 0) {
-    const preRules = sessionRules.filter(r => r.stage === 'pre');
-    const catRules = sessionRules.filter(r => r.stage === null);
-    console.log(`\n${chalk.bold(sessionRules.length)} new rules this session: ${preRules.length} payee, ${catRules.length} category`);
+  const allPreRules = allRules.filter(r => r.stage === 'pre');
+  const allCatRules = allRules.filter(r => r.stage === null);
+  const sessionPreRules = sessionRules.filter(r => r.stage === 'pre');
+  const sessionCatRules = sessionRules.filter(r => r.stage === null);
 
+  const newSuffix = sessionRules.length > 0
+    ? chalk.dim(` (${sessionRules.length} new this session)`)
+    : '';
+  console.log(`\n${chalk.bold(allRules.length)} vetted rules: ${allPreRules.length} payee, ${allCatRules.length} category${newSuffix}`);
+
+  if (allRules.length > 0) {
     const rulesAction = await select({
-      message: 'What would you like to do with the new rules?',
+      message: 'What would you like to do with the vetted rules?',
       choices: [
-        { name: `Review ${sessionRules.length} rules`, value: 'review' },
-        { name: 'Create all in Actual Budget', value: 'create' },
+        { name: `Review ${sessionRules.length > 0 ? sessionRules.length + ' new' : allRules.length} rules`, value: 'review' },
+        { name: `Create all ${allRules.length} rules in Actual Budget`, value: 'create' },
         { name: 'Skip', value: 'skip' },
       ],
     });
 
     if (rulesAction === 'review') {
+      const toShow = sessionRules.length > 0 ? sessionRules : allRules;
       console.log('');
-      for (const rule of sessionRules) {
+      for (const rule of toShow) {
         const tag = rule.stage === null ? tagLookup(rule.matchValue) : null;
         const tagStr = tag ? chalk.dim(` #${tag}`) : '';
         if (rule.stage === 'pre') {
@@ -352,20 +364,22 @@ export async function runEndOfSession(
       console.log('');
 
       const doCreate = await confirm({
-        message: `Create these rules in Actual Budget?`,
+        message: `Create all ${allRules.length} rules in Actual Budget?`,
         default: true,
       });
       if (doCreate) {
-        await createRulesInActual(sessionRules, tagLookup, actual);
+        await createRulesInActual(allRules, tagLookup, actual);
       }
     } else if (rulesAction === 'create') {
-      await createRulesInActual(sessionRules, tagLookup, actual);
+      await createRulesInActual(allRules, tagLookup, actual);
     }
   } else {
-    console.log('No new rules this session.');
+    console.log('No vetted rules yet.');
   }
 
   // ── Import transactions ────────────────────────────────────────────────────
+  const categoryLookup = (cleanPayee: string) => vetted.findCategoryRule(cleanPayee)?.actionValue ?? null;
+
   const mappedTxCount = transactions.filter(t => payeeMap.has(t.rawPayee)).length;
   const doImport = await confirm({
     message: `Import ${transactions.length} transactions (${mappedTxCount} with mapped payees)?`,
@@ -373,7 +387,7 @@ export async function runEndOfSession(
   });
 
   if (doImport) {
-    await importTransactions(transactions, payeeMap, tagLookup, accountMapping, actual);
+    await importTransactions(transactions, payeeMap, tagLookup, categoryLookup, accountMapping, actual);
 
     // Flush the import payload before transfer detection so each sync POST stays small.
     await actual.sync();

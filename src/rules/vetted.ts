@@ -49,6 +49,10 @@ export class VettedRuleStore {
     return [...this.sessionKeys].map(k => this.store.rules[k]).filter(Boolean);
   }
 
+  getAllRules(): VettedRule[] {
+    return Object.values(this.store.rules);
+  }
+
   // Tag persistence — keyed by clean payee name
   hasTag(cleanPayee: string): boolean {
     return cleanPayee in this.store.tags;
