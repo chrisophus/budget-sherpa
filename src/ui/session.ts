@@ -271,8 +271,8 @@ async function importTransactions(
 
       // Convert YYYYMMDD → YYYY-MM-DD
       const date = `${tx.date.slice(0, 4)}-${tx.date.slice(4, 6)}-${tx.date.slice(6, 8)}`;
-      // Convert to milliunits
-      const amount = Math.round(tx.amount * 1000);
+      // Convert to cents (Actual Budget importTransactions unit)
+      const amount = Math.round(tx.amount * 100);
 
       return {
         date,
