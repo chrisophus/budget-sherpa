@@ -249,6 +249,35 @@ async function createRulesInActual(
 
 // ── Transaction import ────────────────────────────────────────────────────────
 
+// Exported for testing
+export function buildTxPayload(
+  tx: RawTransaction,
+  payeeMap: Map<string, string>,
+  tagLookup: (cleanPayee: string) => string | null,
+  categoryLookup: (cleanPayee: string) => string | null,
+  categoryIdByName: Map<string, string>,
+): Record<string, unknown> {
+  const cleanPayee = payeeMap.get(tx.rawPayee);
+  const tag = cleanPayee ? tagLookup(cleanPayee) : null;
+  const categoryName = cleanPayee ? categoryLookup(cleanPayee) : null;
+  const categoryId = categoryName ? categoryIdByName.get(categoryName.toLowerCase()) : null;
+
+  // Convert YYYYMMDD → YYYY-MM-DD
+  const date = `${tx.date.slice(0, 4)}-${tx.date.slice(4, 6)}-${tx.date.slice(6, 8)}`;
+  // Convert to cents (Actual Budget importTransactions unit)
+  const amount = Math.round(tx.amount * 100);
+
+  return {
+    date,
+    amount,
+    imported_id: tx.id,
+    imported_payee: tx.rawPayee,
+    ...(cleanPayee ? { payee_name: cleanPayee } : {}),
+    ...(categoryId ? { category: categoryId } : {}),
+    ...(tag ? { notes: `#${tag}` } : {}),
+  };
+}
+
 async function importTransactions(
   transactions: RawTransaction[],
   payeeMap: Map<string, string>,
@@ -266,27 +295,9 @@ async function importTransactions(
   for (const [qfxAcctId, actualAcctId] of accountMapping) {
     const acctTxs = transactions.filter(t => t.account === qfxAcctId);
 
-    const payload = acctTxs.map(tx => {
-      const cleanPayee = payeeMap.get(tx.rawPayee);
-      const tag = cleanPayee ? tagLookup(cleanPayee) : null;
-      const categoryName = cleanPayee ? categoryLookup(cleanPayee) : null;
-      const categoryId = categoryName ? categoryIdByName.get(categoryName.toLowerCase()) : null;
-
-      // Convert YYYYMMDD → YYYY-MM-DD
-      const date = `${tx.date.slice(0, 4)}-${tx.date.slice(4, 6)}-${tx.date.slice(6, 8)}`;
-      // Convert to cents (Actual Budget importTransactions unit)
-      const amount = Math.round(tx.amount * 100);
-
-      return {
-        date,
-        amount,
-        imported_id: tx.id,
-        imported_payee: tx.rawPayee,
-        ...(cleanPayee ? { payee_name: cleanPayee } : {}),
-        ...(categoryId ? { category: categoryId } : {}),
-        ...(tag ? { notes: `#${tag}` } : {}),
-      };
-    });
+    const payload = acctTxs.map(tx =>
+      buildTxPayload(tx, payeeMap, tagLookup, categoryLookup, categoryIdByName)
+    );
 
     try {
       const result = await actual.importTransactions(actualAcctId, payload);

@@ -1,0 +1,107 @@
+import { describe, it, expect } from 'vitest';
+import { writeFileSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { parseQfx, parseQfxMeta } from './qfx.js';
+
+// Minimal QFX fixture builder
+function makeQfx(opts: {
+  acctId?: string;
+  acctType?: string;
+  isCredit?: boolean;
+  transactions?: Array<{ id: string; name: string; amount: string; date: string }>;
+}): string {
+  const acctId = opts.acctId ?? 'TEST1234';
+  const txBlocks = (opts.transactions ?? [])
+    .map(t => `<STMTTRN>\n<FITID>${t.id}\n<NAME>${t.name}\n<TRNAMT>${t.amount}\n<DTPOSTED>${t.date}\n</STMTTRN>`)
+    .join('\n');
+
+  if (opts.isCredit) {
+    return `<CCACCTFROM>\n<ACCTID>${acctId}\n</CCACCTFROM>\n${txBlocks}`;
+  }
+  return `<BANKACCTFROM>\n<ACCTID>${acctId}\n<ACCTTYPE>${opts.acctType ?? 'CHECKING'}\n</BANKACCTFROM>\n${txBlocks}`;
+}
+
+function withTempFile(content: string, fn: (path: string) => void) {
+  const path = join(tmpdir(), `test-${Date.now()}.qfx`);
+  writeFileSync(path, content, 'utf-8');
+  try { fn(path); } finally { unlinkSync(path); }
+}
+
+describe('parseQfx', () => {
+  it('parses a single transaction correctly', () => {
+    const qfx = makeQfx({
+      acctId: 'ACCT001',
+      transactions: [{ id: 'TX1', name: 'AMAZON MKTPL', amount: '-42.99', date: '20260115120000' }],
+    });
+    withTempFile(qfx, path => {
+      const txs = parseQfx(path);
+      expect(txs).toHaveLength(1);
+      expect(txs[0]).toMatchObject({
+        id: 'TX1',
+        rawPayee: 'AMAZON MKTPL',
+        amount: -42.99,
+        date: '20260115',
+        account: 'ACCT001',
+      });
+    });
+  });
+
+  it('parses multiple transactions', () => {
+    const qfx = makeQfx({
+      transactions: [
+        { id: 'T1', name: 'STARBUCKS', amount: '-5.75', date: '20260101' },
+        { id: 'T2', name: 'PAYROLL', amount: '2500.00', date: '20260115' },
+      ],
+    });
+    withTempFile(qfx, path => {
+      const txs = parseQfx(path);
+      expect(txs).toHaveLength(2);
+      expect(txs[0].amount).toBe(-5.75);
+      expect(txs[1].amount).toBe(2500);
+    });
+  });
+
+  it('truncates date to YYYYMMDD', () => {
+    const qfx = makeQfx({
+      transactions: [{ id: 'T1', name: 'FOO', amount: '-1.00', date: '20260315120000[+0:GMT]' }],
+    });
+    withTempFile(qfx, path => {
+      expect(parseQfx(path)[0].date).toBe('20260315');
+    });
+  });
+
+  it('returns empty array when no transactions', () => {
+    const qfx = makeQfx({});
+    withTempFile(qfx, path => {
+      expect(parseQfx(path)).toHaveLength(0);
+    });
+  });
+});
+
+describe('parseQfxMeta', () => {
+  it('detects credit card account', () => {
+    const qfx = makeQfx({ acctId: 'CC5678', isCredit: true });
+    withTempFile(qfx, path => {
+      const [meta] = parseQfxMeta([path]);
+      expect(meta.acctType).toBe('credit');
+      expect(meta.lastFour).toBe('5678');
+    });
+  });
+
+  it('detects checking account', () => {
+    const qfx = makeQfx({ acctId: 'CHK0077', acctType: 'CHECKING' });
+    withTempFile(qfx, path => {
+      const [meta] = parseQfxMeta([path]);
+      expect(meta.acctType).toBe('checking');
+    });
+  });
+
+  it('detects savings account', () => {
+    const qfx = makeQfx({ acctId: 'SAV9999', acctType: 'SAVINGS' });
+    withTempFile(qfx, path => {
+      const [meta] = parseQfxMeta([path]);
+      expect(meta.acctType).toBe('savings');
+    });
+  });
+});

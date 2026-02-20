@@ -2,10 +2,55 @@ import { confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { ActualClient } from '../actual/client.js';
 
-const DATE_TOLERANCE_DAYS = 5;
+export const DATE_TOLERANCE_DAYS = 5;
 
-function daysBetween(a: string, b: string): number {
+export function daysBetween(a: string, b: string): number {
   return Math.abs((new Date(a).getTime() - new Date(b).getTime()) / 86400000);
+}
+
+// Exported for testing
+export function findTransferPairs(
+  txsByAccount: Map<string, Tx[]>,
+  accountNames: Map<string, string>,
+): TransferPair[] {
+  const accountIds = [...txsByAccount.keys()];
+  const pairs: TransferPair[] = [];
+  const used = new Set<string>();
+
+  for (let i = 0; i < accountIds.length; i++) {
+    for (let j = i + 1; j < accountIds.length; j++) {
+      const acctA = accountIds[i];
+      const acctB = accountIds[j];
+      const txsA = txsByAccount.get(acctA) ?? [];
+      const txsB = txsByAccount.get(acctB) ?? [];
+
+      for (const txA of txsA) {
+        for (const txB of txsB) {
+          if (
+            used.has(txA.id) || used.has(txB.id) ||
+            txA.amount === 0 ||
+            txA.amount !== -txB.amount ||
+            daysBetween(txA.date, txB.date) > DATE_TOLERANCE_DAYS
+          ) continue;
+
+          const [outTx, outAcctId, inTx, inAcctId] =
+            txA.amount < 0
+              ? [txA, acctA, txB, acctB]
+              : [txB, acctB, txA, acctA];
+
+          pairs.push({
+            outTx, outAcctId,
+            inTx, inAcctId,
+            outAcctName: accountNames.get(outAcctId) ?? outAcctId,
+            inAcctName: accountNames.get(inAcctId) ?? inAcctId,
+          });
+          used.add(txA.id);
+          used.add(txB.id);
+        }
+      }
+    }
+  }
+  return pairs;
 }
 
 function formatAmount(milliunits: number): string {
@@ -58,42 +103,7 @@ export async function detectAndLinkTransfers(
 
   // Find transfer candidates: pairs across accounts where amounts cancel
   // and dates are within the tolerance window
-  const pairs: TransferPair[] = [];
-  const used = new Set<string>(); // prevent a transaction matching twice
-
-  for (let i = 0; i < actualAccountIds.length; i++) {
-    for (let j = i + 1; j < actualAccountIds.length; j++) {
-      const acctA = actualAccountIds[i];
-      const acctB = actualAccountIds[j];
-      const txsA = txsByAccount.get(acctA) ?? [];
-      const txsB = txsByAccount.get(acctB) ?? [];
-
-      for (const txA of txsA) {
-        for (const txB of txsB) {
-          if (
-            used.has(txA.id) || used.has(txB.id) ||
-            txA.amount === 0 ||
-            txA.amount !== -txB.amount ||
-            daysBetween(txA.date, txB.date) > DATE_TOLERANCE_DAYS
-          ) continue;
-
-          const [outTx, outAcctId, inTx, inAcctId] =
-            txA.amount < 0
-              ? [txA, acctA, txB, acctB]
-              : [txB, acctB, txA, acctA];
-
-          pairs.push({
-            outTx, outAcctId,
-            inTx, inAcctId,
-            outAcctName: accountNames.get(outAcctId) ?? outAcctId,
-            inAcctName: accountNames.get(inAcctId) ?? inAcctId,
-          });
-          used.add(txA.id);
-          used.add(txB.id);
-        }
-      }
-    }
-  }
+  const pairs = findTransferPairs(txsByAccount, accountNames);
 
   if (pairs.length === 0) {
     console.log(chalk.dim('  No transfer candidates found.'));
