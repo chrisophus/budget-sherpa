@@ -5,6 +5,18 @@ import type { VettedRuleStore } from '../rules/vetted.js';
 import { findPreRule, ruleKey } from '../rules/engine.js';
 import { extractMatchValue } from '../rules/normalize.js';
 
+// Run fn over items with at most `concurrency` in-flight at once.
+async function withConcurrency<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
+  const queue = [...items];
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (queue.length > 0) await fn(queue.shift()!);
+    }),
+  );
+}
+
+const LLM_CONCURRENCY = 5;
+
 const TAG_CHOICES = [
   { name: 'Skip (no tag)', value: '' },
   { name: 'Fixed          #fixed', value: 'fixed' },
@@ -58,7 +70,7 @@ export async function browseAndVet(
   type RawMeta = { matchValue: string; cleanPayee: string; preRuleKey: string; wasVetted: boolean };
   const rawMeta = new Map<string, RawMeta>();
 
-  await Promise.all(uniqueRawPayees.map(async (rawPayee) => {
+  await withConcurrency(uniqueRawPayees, LLM_CONCURRENCY, async (rawPayee) => {
     const txs = byRawPayee.get(rawPayee)!;
     const matchedRule = findPreRule(rules, txs[0]);
     const key = matchedRule ? ruleKey(matchedRule) : null;
@@ -88,7 +100,7 @@ export async function browseAndVet(
       preRuleKey: key ?? `pre:imported_payee:contains:${matchValue}:payee:${cleanPayee}`,
       wasVetted: false,
     });
-  }));
+  });
 
   // ── Group by matchValue (one row = one pre-rule) ─────────────────────────────
 
@@ -120,9 +132,9 @@ export async function browseAndVet(
   // ── Phase 2: category proposals for new rows (parallel) ─────────────────────
 
   const newRows = [...rowsByMatch.values()].filter(r => !r.wasVetted && r.category === null);
-  await Promise.all(newRows.map(async row => {
+  await withConcurrency(newRows, LLM_CONCURRENCY, async row => {
     row.category = (await llm.proposeCategory(row.cleanPayee, categoryNames)) || null;
-  }));
+  });
 
   const rows = [...rowsByMatch.values()];
 
