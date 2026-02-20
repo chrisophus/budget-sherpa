@@ -170,12 +170,13 @@ export async function vetCategoryRule(
 
 // --- Stage 3: Tag assignment ---
 
-const TAG_CHOICES = [
+const PRESET_TAG_CHOICES = [
+  { name: 'Skip (no tag)', value: '' },
   { name: 'Fixed          #fixed', value: 'fixed' },
   { name: 'Discretionary  #discretionary', value: 'discretionary' },
   { name: 'Subscription   #subscription', value: 'subscription' },
-  { name: 'Skip (no tag)', value: '' },
-] as const;
+  { name: 'New tag…', value: '__new__' },
+];
 
 export async function vetTag(
   cleanPayee: string,
@@ -186,10 +187,14 @@ export async function vetTag(
     return vetted.getTag(cleanPayee);
   }
 
-  const tag = await select({
+  let tag = await select({
     message: `Tag "${cleanPayee}":`,
-    choices: TAG_CHOICES as any,
+    choices: PRESET_TAG_CHOICES,
   }) as string;
+
+  if (tag === '__new__') {
+    tag = (await input({ message: 'Tag name (without #):' })).trim().toLowerCase().replace(/\s+/g, '-');
+  }
 
   const result = tag === '' ? null : tag;
   vetted.setTag(cleanPayee, result);
