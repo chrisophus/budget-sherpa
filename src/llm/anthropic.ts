@@ -85,12 +85,15 @@ Categories: ${categories.join(', ')}`,
         content: `You are reviewing bank transaction payee groupings for a personal finance app. Each line shows: clean name (category): raw bank strings that map to it.
 
 Actively look for and flag these patterns:
-- SPLIT: raw payees in the same group that represent meaningfully different merchants or expense types (e.g. "AMAZON FRESH" mixed with "AMAZON MKTPL" — groceries vs shopping)
-- RENAME: the clean name is unclear, too abbreviated, or could be more recognizable
-- CATEGORY: the assigned category seems wrong given the merchant type
-- FLAG: transfers between accounts disguised as expenses, duplicate merchants under different names, or other notable patterns
 
-Be specific and helpful. If you see things worth flagging, flag them.
+- SPLIT: raw payees in the same group that represent meaningfully different merchants or expense types (e.g. "AMAZON FRESH" mixed with "AMAZON MKTPL" — groceries vs shopping; or multiple distinct gas station brands like "CASEY'S", "KWIK TRIP", "SHELL" all collapsed under one name — each brand should be its own payee)
+- RENAME: the clean name is a generic category word ("Gas Station", "Restaurant", "Store") instead of the actual merchant name, or is unclear/too abbreviated
+- CATEGORY: the assigned category seems wrong for the merchant type
+- FLAG: transfers between accounts disguised as expenses (e.g. "AUTOMATIC PAYMENT", "ONLINE PAYMENT"), or other notable issues
+
+Key rule: different businesses should never share a clean name, even if they're in the same industry. "Shell" and "Casey's" and "Kwik Trip" are different payees that happen to sell gas — they should not be merged.
+
+Be thorough. Flag every issue you find.
 
 ${groupText}`,
       }],

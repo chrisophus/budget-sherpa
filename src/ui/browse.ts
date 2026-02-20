@@ -251,15 +251,25 @@ export async function browseAndVet(
 
   const rows = [...rowsByMatch.values()].sort((a, b) => a.cleanPayee.localeCompare(b.cleanPayee));
 
-  // ── Phase 2.5: AI grouping review ────────────────────────────────────────────
+  // ── Phase 2.5: AI grouping review (opt-in) ───────────────────────────────────
 
-  process.stdout.write(chalk.dim('Reviewing groupings for anomalies…'));
-  const groups = rows.map(r => ({ cleanPayee: r.cleanPayee, category: r.category, rawPayees: r.rawPayees }));
-  const suggestions = await llm.reviewGroupings(groups);
-  process.stdout.write('\r' + chalk.dim(`Reviewing groupings for anomalies… ${suggestions.length} suggestion(s) found.\n`));
+  const { confirm } = await import('@inquirer/prompts');
+  const runReview = await confirm({
+    message: `Run AI anomaly review? (checks all ${rows.length} groupings for issues)`,
+    default: false,
+  });
 
-  if (suggestions.length > 0) {
-    await applySuggestions(suggestions, rows, byRawPayee);
+  if (runReview) {
+    process.stdout.write(chalk.dim('Reviewing groupings for anomalies…'));
+    const groups = rows.map(r => ({ cleanPayee: r.cleanPayee, category: r.category, rawPayees: r.rawPayees }));
+    const suggestions = await llm.reviewGroupings(groups);
+    process.stdout.write('\r' + chalk.dim(`Reviewing groupings for anomalies… ${suggestions.length} suggestion(s) found.\n`));
+
+    if (suggestions.length > 0) {
+      await applySuggestions(suggestions, rows, byRawPayee);
+    } else {
+      console.log(chalk.dim('No anomalies found.'));
+    }
   }
 
   // ── Phase 3: browse loop ─────────────────────────────────────────────────────
