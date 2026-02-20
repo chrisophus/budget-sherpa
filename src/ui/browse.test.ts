@@ -9,7 +9,11 @@ vi.mock('@inquirer/prompts', () => ({
 }));
 
 import { select } from '@inquirer/prompts';
-import { withConcurrency, applySuggestions, type PayeeRow } from './browse.js';
+import { withConcurrency, applySuggestions, saveDecisions, type PayeeRow } from './browse.js';
+import { VettedRuleStore } from '../rules/vetted.js';
+import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -186,5 +190,88 @@ describe('applySuggestions', () => {
     await applySuggestions([{ type: 'rename', cleanPayee: 'Nonexistent', suggestedName: 'X', reason: '' }], rows, new Map());
     // select should never have been called since no matching rows
     expect(vi.mocked(select)).not.toHaveBeenCalled();
+  });
+});
+
+// ── saveDecisions (Phase 4 stale-rule cleanup) ────────────────────────────────
+
+function tmpStore() {
+  const path = join(tmpdir(), `vetted-browse-${Date.now()}.json`);
+  const store = new VettedRuleStore(path);
+  const cleanup = () => { if (existsSync(path)) unlinkSync(path); };
+  return { store, cleanup };
+}
+
+describe('saveDecisions', () => {
+  it('builds payeeMap from non-skipped rows', () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      const rows = [
+        makeRow({ rawPayees: ['RAW A'], cleanPayee: 'Amazon' }),
+        makeRow({ rawPayees: ['RAW B'], cleanPayee: 'Starbucks', skipped: true }),
+      ];
+      const map = saveDecisions(rows, store, []);
+      expect(map.get('RAW A')).toBe('Amazon');
+      expect(map.has('RAW B')).toBe(false);
+    } finally { cleanup(); }
+  });
+
+  it('rename — removes old pre-rule and saves new one', () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      // Seed an old rule: SINCLAIR GAS → Gas Station
+      const oldKey = 'pre:imported_payee:contains:SINCLAIR GAS:payee:Gas Station';
+      store.approve({ key: oldKey, stage: 'pre', matchField: 'imported_payee', matchOp: 'contains',
+        matchValue: 'SINCLAIR GAS', actionField: 'payee', actionValue: 'Gas Station', vettedAt: '' });
+
+      const newKey = 'pre:imported_payee:contains:SINCLAIR GAS:payee:Sinclair';
+      const row = makeRow({
+        matchValue: 'SINCLAIR GAS', cleanPayee: 'Sinclair',
+        preRuleKey: newKey, wasVetted: true, touched: true,
+      });
+      saveDecisions([row], store, []);
+
+      expect(store.isVetted(oldKey)).toBe(false); // old rule removed
+      expect(store.isVetted(newKey)).toBe(true);  // new rule saved
+      expect(store.findPayeeRule('SINCLAIR GAS #12')?.actionValue).toBe('Sinclair');
+    } finally { cleanup(); }
+  });
+
+  it('split — removes rule for emptied row so payees don\'t re-join old group', () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      // Seed old rule: CONOCO MART → Gas Station
+      const oldKey = 'pre:imported_payee:contains:CONOCO MART:payee:Gas Station';
+      store.approve({ key: oldKey, stage: 'pre', matchField: 'imported_payee', matchOp: 'contains',
+        matchValue: 'CONOCO MART', actionField: 'payee', actionValue: 'Gas Station', vettedAt: '' });
+
+      // After split: original row is empty, new row has the payees
+      const emptyRow = makeRow({ matchValue: 'CONOCO MART', rawPayees: [], wasVetted: true, touched: true });
+      const newRow  = makeRow({ matchValue: 'CONOCO MART', rawPayees: ['CONOCO MART #12'],
+        cleanPayee: 'Conoco', preRuleKey: 'pre:imported_payee:contains:CONOCO MART:payee:Conoco', touched: true });
+
+      saveDecisions([emptyRow, newRow], store, []);
+
+      expect(store.isVetted(oldKey)).toBe(false); // old rule removed by empty-row cleanup
+      expect(store.findPayeeRule('CONOCO MART #12')?.actionValue).toBe('Conoco');
+    } finally { cleanup(); }
+  });
+
+  it('previously vetted untouched row is not re-saved but still added to payeeMap', () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      const key = 'pre:imported_payee:contains:AMAZON:payee:Amazon';
+      store.approve({ key, stage: 'pre', matchField: 'imported_payee', matchOp: 'contains',
+        matchValue: 'AMAZON', actionField: 'payee', actionValue: 'Amazon', vettedAt: '' });
+      const sessionKeysBefore = store.getSessionRules().length;
+
+      const row = makeRow({ matchValue: 'AMAZON', rawPayees: ['AMAZON MKTPL'], cleanPayee: 'Amazon',
+        preRuleKey: key, wasVetted: true, touched: false });
+      const map = saveDecisions([row], store, []);
+
+      expect(map.get('AMAZON MKTPL')).toBe('Amazon');
+      // approve() was NOT called again, so session rules count unchanged
+      expect(store.getSessionRules().length).toBe(sessionKeysBefore);
+    } finally { cleanup(); }
   });
 });

@@ -150,6 +150,73 @@ export async function applySuggestions(
   }
 }
 
+// Exported for testing. Persists row decisions to the vetted store and
+// returns rawPayee → cleanPayee mapping.
+export function saveDecisions(
+  rows: PayeeRow[],
+  vetted: VettedRuleStore,
+  knownPayeeNames: string[],
+): Map<string, string> {
+  const payeeMap = new Map<string, string>();
+
+  for (const row of rows) {
+    if (row.skipped) continue;
+
+    // A split may have moved all raw payees out of this row — clean up its
+    // old rule so those payees don't re-join this group on the next run.
+    if (row.rawPayees.length === 0) {
+      const stale = vetted.getAllRules().find(r => r.stage === 'pre' && r.matchValue === row.matchValue);
+      if (stale) vetted.remove(stale.key);
+      continue;
+    }
+
+    for (const raw of row.rawPayees) {
+      payeeMap.set(raw, row.cleanPayee);
+    }
+    if (!knownPayeeNames.includes(row.cleanPayee)) knownPayeeNames.push(row.cleanPayee);
+
+    // Save to store only for new payees or ones the user explicitly touched
+    if (row.wasVetted && !row.touched) continue;
+
+    // Remove any stale pre-rule for this matchValue (e.g. from a rename) so
+    // the old cleanPayee name doesn't persist alongside the new one.
+    const stalePreRule = vetted.getAllRules().find(
+      r => r.stage === 'pre' && r.matchValue === row.matchValue && r.key !== row.preRuleKey,
+    );
+    if (stalePreRule) vetted.remove(stalePreRule.key);
+
+    vetted.approve({
+      key: row.preRuleKey,
+      stage: 'pre',
+      matchField: 'imported_payee',
+      matchOp: 'contains',
+      matchValue: row.matchValue,
+      actionField: 'payee',
+      actionValue: row.cleanPayee,
+      vettedAt: new Date().toISOString(),
+    });
+
+    if (row.category !== null) {
+      vetted.approve({
+        key: `null:payee:is:${row.cleanPayee}:category:${row.category}`,
+        stage: null,
+        matchField: 'payee',
+        matchOp: 'is',
+        matchValue: row.cleanPayee,
+        actionField: 'category',
+        actionValue: row.category,
+        vettedAt: new Date().toISOString(),
+      });
+    }
+
+    if (row.tagDecided) {
+      vetted.setTag(row.cleanPayee, row.tag);
+    }
+  }
+
+  return payeeMap;
+}
+
 export async function browseAndVet(
   uniqueRawPayees: string[],
   byRawPayee: Map<string, RawTransaction[]>,
@@ -401,47 +468,7 @@ export async function browseAndVet(
 
   // ── Phase 4: save decisions to vetted store ──────────────────────────────────
 
-  const payeeMap = new Map<string, string>();
-
-  for (const row of rows) {
-    if (row.skipped) continue;
-
-    for (const raw of row.rawPayees) {
-      payeeMap.set(raw, row.cleanPayee);
-    }
-    if (!knownPayeeNames.includes(row.cleanPayee)) knownPayeeNames.push(row.cleanPayee);
-
-    // Save to store only for new payees or ones the user explicitly touched
-    if (row.wasVetted && !row.touched) continue;
-
-    vetted.approve({
-      key: row.preRuleKey,
-      stage: 'pre',
-      matchField: 'imported_payee',
-      matchOp: 'contains',
-      matchValue: row.matchValue,
-      actionField: 'payee',
-      actionValue: row.cleanPayee,
-      vettedAt: new Date().toISOString(),
-    });
-
-    if (row.category !== null) {
-      vetted.approve({
-        key: `null:payee:is:${row.cleanPayee}:category:${row.category}`,
-        stage: null,
-        matchField: 'payee',
-        matchOp: 'is',
-        matchValue: row.cleanPayee,
-        actionField: 'category',
-        actionValue: row.category,
-        vettedAt: new Date().toISOString(),
-      });
-    }
-
-    if (row.tagDecided) {
-      vetted.setTag(row.cleanPayee, row.tag);
-    }
-  }
+  const payeeMap = saveDecisions(rows, vetted, knownPayeeNames);
 
   return { payeeMap, quit };
 }
