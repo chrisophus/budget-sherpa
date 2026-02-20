@@ -249,7 +249,7 @@ export async function browseAndVet(
     process.stdout.write('\n');
   }
 
-  const rows = [...rowsByMatch.values()];
+  const rows = [...rowsByMatch.values()].sort((a, b) => a.cleanPayee.localeCompare(b.cleanPayee));
 
   // ── Phase 2.5: AI grouping review ────────────────────────────────────────────
 
