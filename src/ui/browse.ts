@@ -6,7 +6,7 @@ import { findPreRule, ruleKey } from '../rules/engine.js';
 import { extractMatchValue } from '../rules/normalize.js';
 
 // Run fn over items with at most `concurrency` in-flight at once.
-async function withConcurrency<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
+export async function withConcurrency<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
   const queue = [...items];
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length) }, async () => {
@@ -25,7 +25,7 @@ const TAG_CHOICES = [
   { name: 'New tag…', value: '__new__' },
 ];
 
-interface PayeeRow {
+export interface PayeeRow {
   rawPayees: string[];      // raw payees covered by this match pattern
   txCount: number;
   matchValue: string;       // match pattern used in the pre-rule
@@ -52,7 +52,7 @@ function rowLabel(row: PayeeRow): string {
   return '  ' + body;
 }
 
-async function applySuggestions(
+export async function applySuggestions(
   suggestions: Suggestion[],
   rows: PayeeRow[],
   byRawPayee: Map<string, RawTransaction[]>,

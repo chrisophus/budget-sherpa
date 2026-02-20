@@ -161,7 +161,7 @@ async function editSessionDecisions(
 
 // ── Rule creation ─────────────────────────────────────────────────────────────
 
-async function createRulesInActual(
+export async function createRulesInActual(
   rules: VettedRule[],
   tagLookup: (cleanPayee: string) => string | null,
   actual: ActualClient,

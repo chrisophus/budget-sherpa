@@ -77,6 +77,27 @@ describe('parseQfx', () => {
       expect(parseQfx(path)).toHaveLength(0);
     });
   });
+
+  it('handles Capital One XML format (closing tags)', () => {
+    // Capital One emits <TRNAMT>-36.00</TRNAMT> with closing tag and leading whitespace
+    const qfx = `<CCACCTFROM>\n<ACCTID>CC5678\n</CCACCTFROM>\n` +
+      `<STMTTRN>\n    <FITID>TX1\n    <NAME>NETFLIX</TRNNAME>\n    <TRNAMT>-15.99</TRNAMT>\n    <DTPOSTED>20260115</DTPOSTED>\n</STMTTRN>`;
+    withTempFile(qfx, path => {
+      const txs = parseQfx(path);
+      expect(txs).toHaveLength(1);
+      expect(txs[0].amount).toBe(-15.99);
+    });
+  });
+
+  it('skips transactions with missing required fields', () => {
+    // Transaction missing NAME field — should be skipped
+    const qfx = makeQfx({
+      transactions: [{ id: 'T1', name: 'VALID', amount: '-10.00', date: '20260101' }],
+    }).replace('<NAME>VALID', ''); // remove NAME field
+    withTempFile(qfx, path => {
+      expect(parseQfx(path)).toHaveLength(0);
+    });
+  });
 });
 
 describe('parseQfxMeta', () => {
