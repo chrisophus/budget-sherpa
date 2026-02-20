@@ -76,7 +76,7 @@ interface TransferPair {
 }
 
 export async function detectAndLinkTransfers(
-  accountMapping: Map<string, string>, // qfxAcctId → actualAccountId
+  accountIds: string[], // actual account IDs to scan
   actual: ActualClient,
   syncBatchSize = 5, // sync after this many linked pairs to keep payloads small
 ): Promise<void> {
@@ -92,7 +92,7 @@ export async function detectAndLinkTransfers(
   );
 
   const accountNames = new Map(accounts.map(a => [a.id, a.name]));
-  const actualAccountIds = [...new Set(accountMapping.values())];
+  const actualAccountIds = accountIds;
 
   // Fetch all unlinked transactions for each imported account
   const txsByAccount = new Map<string, Tx[]>();

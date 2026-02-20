@@ -403,10 +403,14 @@ export async function runEndOfSession(
     // Flush the import payload before transfer detection so each sync POST stays small.
     await actual.sync();
 
-    // Transfer detection — find and link paired transactions across accounts
-    if (!skipTransferDetection && accountMapping.size > 1) {
-      console.log('\n' + chalk.bold('── Transfer Detection ───────────────────────'));
-      await detectAndLinkTransfers(accountMapping, actual);
+    // Transfer detection — scan ALL accounts in Actual Budget, not just
+    // the ones imported this session, so transfers can be detected across runs.
+    if (!skipTransferDetection) {
+      const allAccounts = await actual.getAccounts() as Array<{ id: string; name: string }>;
+      if (allAccounts.length > 1) {
+        console.log('\n' + chalk.bold('── Transfer Detection ───────────────────────'));
+        await detectAndLinkTransfers(allAccounts.map(a => a.id), actual);
+      }
     }
   }
 }
