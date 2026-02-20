@@ -375,6 +375,9 @@ export async function runEndOfSession(
   if (doImport) {
     await importTransactions(transactions, payeeMap, tagLookup, accountMapping, actual);
 
+    // Flush the import payload before transfer detection so each sync POST stays small.
+    await actual.sync();
+
     // Transfer detection — find and link paired transactions across accounts
     if (!skipTransferDetection && accountMapping.size > 1) {
       console.log('\n' + chalk.bold('── Transfer Detection ───────────────────────'));

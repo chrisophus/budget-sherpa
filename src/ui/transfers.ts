@@ -33,6 +33,7 @@ interface TransferPair {
 export async function detectAndLinkTransfers(
   accountMapping: Map<string, string>, // qfxAcctId → actualAccountId
   actual: ActualClient,
+  syncBatchSize = 5, // sync after this many linked pairs to keep payloads small
 ): Promise<void> {
   const accounts = await actual.getAccounts() as Array<{ id: string; name: string }>;
   const payees = await actual.getPayees() as Array<{ id: string; name: string; transfer_acct?: string }>;
@@ -148,6 +149,7 @@ export async function detectAndLinkTransfers(
           transfer_id: outTx.id,
         });
         linked++;
+        if (linked % syncBatchSize === 0) await actual.sync();
       } catch (err: any) {
         console.log(chalk.red(`  ✗ ${outTx.date} ${formatAmount(outTx.amount)}: ${err.message ?? err}`));
       }

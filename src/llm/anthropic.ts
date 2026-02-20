@@ -47,13 +47,17 @@ Categories: ${categories.join(', ')}`,
   }
 
   async reviewGroupings(groups: GroupForReview[]): Promise<Suggestion[]> {
-    const groupText = groups
+    // Only groups with multiple raw payees can have a miscategorization — skip singletons
+    const multiGroups = groups.filter(g => g.rawPayees.length > 1);
+    if (multiGroups.length === 0) return [];
+
+    const groupText = multiGroups
       .map(g => `- "${g.cleanPayee}" (${g.category ?? 'no category'}): ${g.rawPayees.join(' | ')}`)
       .join('\n');
 
     const msg = await this.client.messages.create({
-      model: 'claude-sonnet-4-6', // use smarter model — this is a single analysis call
-      max_tokens: 2048,
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4096,
       tools: [{
         name: 'report_anomalies',
         description: 'Report anomalies and suggestions for payee groupings',
@@ -99,16 +103,12 @@ ${groupText}`,
       }],
     });
 
-    console.log('\n[debug] groups sent to LLM:\n' + groupText.slice(0, 2000));
-    console.log('[debug] stop_reason:', msg.stop_reason);
-    console.log('[debug] content blocks:', msg.content.map(b => b.type));
-    const toolUse = msg.content.find(b => b.type === 'tool_use');
-    if (!toolUse || toolUse.type !== 'tool_use') {
-      console.log('[debug] no tool_use block — raw content:', JSON.stringify(msg.content, null, 2).slice(0, 1000));
-      return [];
+    if (msg.stop_reason === 'max_tokens') {
+      console.warn('⚠  AI review hit the token limit — results may be incomplete. Try running with fewer transactions.');
     }
-    const suggestions = ((toolUse.input as any).suggestions as Suggestion[]) ?? [];
-    console.log('[debug] suggestions:', JSON.stringify(suggestions, null, 2));
-    return suggestions;
+
+    const toolUse = msg.content.find(b => b.type === 'tool_use');
+    if (!toolUse || toolUse.type !== 'tool_use') return [];
+    return ((toolUse.input as any).suggestions as Suggestion[]) ?? [];
   }
 }
