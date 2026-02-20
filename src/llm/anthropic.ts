@@ -52,8 +52,8 @@ Categories: ${categories.join(', ')}`,
       .join('\n');
 
     const msg = await this.client.messages.create({
-      model: this.model,
-      max_tokens: 1024,
+      model: 'claude-sonnet-4-6', // use smarter model — this is a single analysis call
+      max_tokens: 2048,
       tools: [{
         name: 'report_anomalies',
         description: 'Report anomalies and suggestions for payee groupings',
@@ -82,9 +82,15 @@ Categories: ${categories.join(', ')}`,
       tool_choice: { type: 'tool' as const, name: 'report_anomalies' },
       messages: [{
         role: 'user',
-        content: `Review these bank transaction payee groupings. Each line shows the assigned clean name, category, and the raw bank strings that map to it.
+        content: `You are reviewing bank transaction payee groupings for a personal finance app. Each line shows: clean name (category): raw bank strings that map to it.
 
-Flag only genuine issues: payees that are miscategorized, should be split into distinct payees, have a better clean name, or are otherwise suspicious. Do not flag things that look correct.
+Actively look for and flag these patterns:
+- SPLIT: raw payees in the same group that represent meaningfully different merchants or expense types (e.g. "AMAZON FRESH" mixed with "AMAZON MKTPL" — groceries vs shopping)
+- RENAME: the clean name is unclear, too abbreviated, or could be more recognizable
+- CATEGORY: the assigned category seems wrong given the merchant type
+- FLAG: transfers between accounts disguised as expenses, duplicate merchants under different names, or other notable patterns
+
+Be specific and helpful. If you see things worth flagging, flag them.
 
 ${groupText}`,
       }],
