@@ -63,6 +63,17 @@ export class VettedRuleStore {
     this.save();
   }
 
+  removeTag(cleanPayee: string): void {
+    delete this.store.tags[cleanPayee];
+    this.save();
+  }
+
+  remove(key: string): void {
+    delete this.store.rules[key];
+    this.sessionKeys.delete(key);
+    this.save();
+  }
+
   private save(): void {
     writeFileSync(this.path, JSON.stringify(this.store, null, 2), 'utf-8');
   }

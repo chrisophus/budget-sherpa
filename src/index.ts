@@ -157,7 +157,7 @@ try {
 
   // ── End-of-session: review rules + import ─────────────────────────────────
   const tagLookup = (cleanPayee: string) => vetted.getTag(cleanPayee);
-  await runEndOfSession(vetted.getSessionRules(), transactions, payeeMap, tagLookup, accountMapping, actual);
+  await runEndOfSession(vetted, transactions, payeeMap, tagLookup, accountMapping, actual);
 
 } catch (err: any) {
   if (err?.name === 'ExitPromptError') {

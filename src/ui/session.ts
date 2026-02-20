@@ -1,8 +1,163 @@
-import { select, confirm } from '@inquirer/prompts';
+import { input, select, confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { VettedRule, RawTransaction } from '../types.js';
+import type { VettedRuleStore } from '../rules/vetted.js';
 import type { ActualClient } from '../actual/client.js';
 import { detectAndLinkTransfers } from './transfers.js';
+
+// ── Edit session decisions ─────────────────────────────────────────────────────
+
+const TAG_CHOICES = [
+  { name: 'Skip (no tag)', value: '' },
+  { name: 'Fixed          #fixed', value: 'fixed' },
+  { name: 'Discretionary  #discretionary', value: 'discretionary' },
+  { name: 'Subscription   #subscription', value: 'subscription' },
+  { name: 'New tag…', value: '__new__' },
+];
+
+async function editSessionDecisions(
+  vetted: VettedRuleStore,
+  payeeMap: Map<string, string>,
+  categoryNames: string[],
+): Promise<void> {
+  while (true) {
+    const sessionRules = vetted.getSessionRules();
+    const preRules = sessionRules.filter(r => r.stage === 'pre');
+
+    if (preRules.length === 0) {
+      console.log('No session decisions to edit.');
+      return;
+    }
+
+    // Build list of clean payees with their current decisions
+    const choices = preRules.map(preRule => {
+      const cleanPayee = preRule.actionValue;
+      const catRule = sessionRules.find(r => r.stage === null && r.matchValue.toLowerCase() === cleanPayee.toLowerCase());
+      const tag = vetted.hasTag(cleanPayee) ? vetted.getTag(cleanPayee) : undefined;
+
+      let label = chalk.cyan(cleanPayee);
+      if (catRule) label += '  ' + chalk.magenta(catRule.actionValue);
+      if (tag) label += '  ' + chalk.dim(`#${tag}`);
+
+      return { name: label, value: cleanPayee };
+    });
+
+    const chosen = await select({
+      message: 'Select a payee to fix (or Done):',
+      choices: [{ name: chalk.bold('Done'), value: '__done__' }, ...choices],
+    });
+
+    if (chosen === '__done__') return;
+
+    const cleanPayee = chosen;
+    const sr = vetted.getSessionRules();
+    const preRule = sr.find(r => r.stage === 'pre' && r.actionValue.toLowerCase() === cleanPayee.toLowerCase());
+    const catRule = sr.find(r => r.stage === null && r.matchValue.toLowerCase() === cleanPayee.toLowerCase());
+    const currentTag = vetted.hasTag(cleanPayee) ? vetted.getTag(cleanPayee) : null;
+
+    if (!preRule) continue;
+
+    console.log(chalk.bold(`\n── ${cleanPayee} ──────────────────────────────`));
+    console.log(`  ${chalk.dim('Match:')}    ${chalk.yellow(preRule.matchValue)}`);
+    console.log(`  ${chalk.dim('Name:')}     ${chalk.cyan(cleanPayee)}`);
+    console.log(`  ${chalk.dim('Category:')} ${catRule ? chalk.magenta(catRule.actionValue) : chalk.dim('(none)')}`);
+    console.log(`  ${chalk.dim('Tag:')}      ${currentTag ? chalk.dim(`#${currentTag}`) : chalk.dim('(none)')}`);
+    console.log('');
+
+    const editAction = await select({
+      message: 'Edit:',
+      choices: [
+        { name: 'Edit clean name', value: 'name' },
+        { name: 'Edit category', value: 'category' },
+        { name: 'Edit tag', value: 'tag' },
+        { name: chalk.red('Remove all decisions for this payee'), value: 'remove' },
+        { name: 'Back', value: 'back' },
+      ],
+    });
+
+    if (editAction === 'back') continue;
+
+    if (editAction === 'name') {
+      const newName = (await input({ message: 'New clean name:', default: cleanPayee })).trim();
+      if (newName === cleanPayee) { console.log(chalk.dim('Unchanged.')); continue; }
+
+      // Re-key the pre-rule with the new name
+      vetted.remove(preRule.key);
+      vetted.approve({ ...preRule, actionValue: newName, key: `pre:imported_payee:contains:${preRule.matchValue}:payee:${newName}` });
+
+      // Re-key the cat-rule (matchValue is the clean payee name)
+      if (catRule) {
+        vetted.remove(catRule.key);
+        vetted.approve({ ...catRule, matchValue: newName, key: `null:payee:is:${newName}:category:${catRule.actionValue}` });
+      }
+
+      // Move the tag entry
+      if (vetted.hasTag(cleanPayee)) {
+        vetted.setTag(newName, vetted.getTag(cleanPayee));
+        vetted.removeTag(cleanPayee);
+      }
+
+      // Update payeeMap: all rawPayees that mapped to the old clean name
+      for (const [raw, name] of payeeMap) {
+        if (name === cleanPayee) payeeMap.set(raw, newName);
+      }
+
+      console.log(chalk.green(`✓ Renamed "${cleanPayee}" → "${newName}"`));
+    }
+
+    if (editAction === 'category') {
+      const newCategory = await select({
+        message: 'Select category:',
+        choices: [
+          { name: chalk.dim('(none — remove category)'), value: '' },
+          ...categoryNames.map(c => ({ name: c, value: c })),
+        ],
+      });
+
+      if (catRule) vetted.remove(catRule.key);
+
+      if (newCategory !== '') {
+        vetted.approve({
+          key: `null:payee:is:${cleanPayee}:category:${newCategory}`,
+          stage: null,
+          matchField: 'payee',
+          matchOp: 'is',
+          matchValue: cleanPayee,
+          actionField: 'category',
+          actionValue: newCategory,
+          vettedAt: new Date().toISOString(),
+        });
+        console.log(chalk.green(`✓ Category → "${newCategory}"`));
+      } else {
+        console.log(chalk.yellow('✓ Category removed'));
+      }
+    }
+
+    if (editAction === 'tag') {
+      let tag = await select({
+        message: `Tag "${cleanPayee}":`,
+        choices: TAG_CHOICES,
+      }) as string;
+
+      if (tag === '__new__') {
+        tag = (await input({ message: 'Tag name (without #):' })).trim().toLowerCase().replace(/\s+/g, '-');
+      }
+
+      vetted.setTag(cleanPayee, tag === '' ? null : tag);
+      console.log(chalk.green(`✓ Tag → ${tag ? `#${tag}` : '(none)'}`));
+    }
+
+    if (editAction === 'remove') {
+      vetted.remove(preRule.key);
+      if (catRule) vetted.remove(catRule.key);
+      if (vetted.hasTag(cleanPayee)) vetted.removeTag(cleanPayee);
+      for (const [raw, name] of payeeMap) {
+        if (name === cleanPayee) payeeMap.delete(raw);
+      }
+      console.log(chalk.yellow(`✓ Removed all decisions for "${cleanPayee}"`));
+    }
+  }
+}
 
 // ── Rule creation ─────────────────────────────────────────────────────────────
 
@@ -148,7 +303,7 @@ async function importTransactions(
 // ── Main end-of-session flow ──────────────────────────────────────────────────
 
 export async function runEndOfSession(
-  sessionRules: VettedRule[],
+  vetted: VettedRuleStore,
   transactions: RawTransaction[],
   payeeMap: Map<string, string>,
   tagLookup: (cleanPayee: string) => string | null,
@@ -158,11 +313,21 @@ export async function runEndOfSession(
 ): Promise<void> {
   console.log('\n' + chalk.bold('── End of Session ───────────────────────────'));
 
-  // --- New rules ---
+  // ── Review / fix decisions ─────────────────────────────────────────────────
+  if (vetted.getSessionRules().some(r => r.stage === 'pre')) {
+    console.log(chalk.bold('\n── Review Decisions ──────────────────────────'));
+    const categories = await actual.getCategories();
+    await editSessionDecisions(vetted, payeeMap, categories.map(c => c.name));
+  }
+
+  // Re-read after potential edits
+  const sessionRules = vetted.getSessionRules();
+
+  // ── New rules ──────────────────────────────────────────────────────────────
   if (sessionRules.length > 0) {
     const preRules = sessionRules.filter(r => r.stage === 'pre');
     const catRules = sessionRules.filter(r => r.stage === null);
-    console.log(`${chalk.bold(sessionRules.length)} new rules this session: ${preRules.length} payee, ${catRules.length} category`);
+    console.log(`\n${chalk.bold(sessionRules.length)} new rules this session: ${preRules.length} payee, ${catRules.length} category`);
 
     const rulesAction = await select({
       message: 'What would you like to do with the new rules?',
@@ -200,7 +365,7 @@ export async function runEndOfSession(
     console.log('No new rules this session.');
   }
 
-  // --- Import transactions ---
+  // ── Import transactions ────────────────────────────────────────────────────
   const mappedTxCount = transactions.filter(t => payeeMap.has(t.rawPayee)).length;
   const doImport = await confirm({
     message: `Import ${transactions.length} transactions (${mappedTxCount} with mapped payees)?`,
