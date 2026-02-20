@@ -31,16 +31,26 @@ Tags the payee for spending analysis using Actual Budget's native `#hashtag` not
 
 Tags are stored in `vetted-rules.json` alongside the payee and category rules, and a dedicated Actual Budget rule is created (`append-notes #tag`) so future imports are tagged automatically.
 
+**AI review**
+After you finish vetting individual payees, Budget Sherpa sends all current decisions to Claude Sonnet for a batch review. The LLM may suggest:
+
+- **Rename** — a cleaner or more specific display name
+- **Split** — separate raw payees that landed in the same group into distinct entries
+- **Category** — add or correct a category assignment
+- **Flag** — surface anything that looks like a transfer or unusual pattern
+
+Each suggestion is shown with the reason and you can accept or skip it. Accepted suggestions update the payee table immediately. Rules that are renamed or split also have their old match entries removed so you won't see the same suggestion again on the next run.
+
 **End of session**
 When you finish vetting (or press Ctrl+C to save progress and exit), Budget Sherpa prompts you to:
 
 1. Review the new rules created this session
-2. Create them in Actual Budget (payee cleaning rules, category rules, tag rules)
-3. Import all transactions — rules are applied automatically during import, and `imported_id` (FITID from the QFX file) prevents duplicates on re-import
+2. Create all vetted rules in Actual Budget (payee cleaning rules, category rules, tag rules)
+3. Import all transactions — categories are applied directly on import; `imported_id` (FITID from the QFX file) prevents duplicates on re-import
 4. Detect and link transfers between accounts
 
 **Transfer detection**
-After import, Budget Sherpa scans all imported accounts for transaction pairs where amounts cancel out (e.g. a -$1,500 in checking and a +$1,500 in a credit card account within 5 days). Confirmed pairs are linked using Actual Budget's transfer payee system so they don't appear as income or expense.
+After import, Budget Sherpa scans **all accounts in your Actual Budget** (not just those imported in the current session) for unlinked transaction pairs where amounts cancel out (e.g. a -$1,500 in checking and a +$1,500 in a credit card account within 5 days). This means transfers are detected even when the two accounts were imported in separate runs. Confirmed pairs are linked using Actual Budget's transfer payee system so they don't appear as income or expense.
 
 **Persistence and restarts**
 All approved rules are saved to `vetted-rules.json` immediately on approval. If you stop mid-session (Ctrl+C or crash), the next run resumes from where you left off — already-vetted payees are skipped silently.
@@ -108,11 +118,12 @@ src/
     normalize.ts        — match pattern extraction (strips trailing codes)
     vetted.ts           — approved rule + tag persistence
   llm/
-    anthropic.ts        — Anthropic (Claude Haiku) adapter
+    anthropic.ts        — Anthropic adapter (Haiku for individual proposals, Sonnet for AI review)
   actual/
     client.ts           — Actual Budget API wrapper
   ui/
-    vetting.ts          — three-stage interactive vetting loop
+    vetting.ts          — three-stage interactive vetting loop (clean → category → tag)
+    browse.ts           — interactive payee table + AI review pass (batch LLM suggestions)
     session.ts          — end-of-session flow (rules, import, transfers)
     transfers.ts        — post-import transfer detection and linking
   index.ts              — entry point
@@ -120,7 +131,12 @@ src/
 
 ## LLM providers
 
-Budget Sherpa ships with an Anthropic adapter using `claude-haiku` for fast, low-cost proposals. To use a different provider, implement the `LLMAdapter` interface in `src/llm/` and swap it in `src/index.ts`.
+Budget Sherpa ships with an Anthropic adapter using two models:
+
+- **Claude Haiku** — individual payee name and category proposals during the vetting loop (fast, low cost, runs per payee)
+- **Claude Sonnet** — the AI review pass after vetting is complete (higher quality batch analysis of all decisions)
+
+To use a different provider, implement the `LLMAdapter` interface in `src/llm/` and swap it in `src/index.ts`.
 
 ## Supported file formats
 
@@ -134,4 +150,5 @@ Early-stage open source project. Contributions welcome — especially:
 
 - Additional LLM adapters (OpenAI, Ollama)
 - CSV parser
-- Tests
+
+The project has a Vitest test suite covering parsers, rule engine, vetted store, and the UI layer. Run it with `npm test`.
