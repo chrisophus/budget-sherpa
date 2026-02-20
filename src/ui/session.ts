@@ -301,9 +301,12 @@ async function importTransactions(
 
     try {
       const result = await actual.importTransactions(actualAcctId, payload);
-      totalAdded += result.added?.length ?? 0;
-      totalUpdated += result.updated?.length ?? 0;
-      console.log(chalk.green(`  ✓ ${acctTxs.length} transactions → account …${qfxAcctId.slice(-4)}`));
+      const added = result.added?.length ?? 0;
+      const dupes = result.updated?.length ?? 0;
+      totalAdded += added;
+      totalUpdated += dupes;
+      const dupeNote = dupes > 0 ? chalk.dim(`, ${dupes} already existed`) : '';
+      console.log(chalk.green(`  ✓ ${added} new transactions → account …${qfxAcctId.slice(-4)}${dupeNote}`));
       if (result.errors?.length) {
         for (const e of result.errors) console.log(chalk.red(`    error: ${JSON.stringify(e)}`));
       }
@@ -312,7 +315,8 @@ async function importTransactions(
     }
   }
 
-  console.log(chalk.bold.green(`\n✓ Import complete: ${totalAdded} added, ${totalUpdated} updated`));
+  const dupesSummary = totalUpdated > 0 ? `, ${totalUpdated} duplicates skipped` : '';
+  console.log(chalk.bold.green(`\n✓ Import complete: ${totalAdded} new transactions${dupesSummary}`));
 }
 
 // ── Main end-of-session flow ──────────────────────────────────────────────────
