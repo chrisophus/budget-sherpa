@@ -127,7 +127,7 @@ try {
   const uniquePayees = [...byRawPayee.keys()];
   console.log(`\n${uniquePayees.length} unique raw payees`);
 
-  const payeeMap = await browseAndVet(
+  const { payeeMap, quit } = await browseAndVet(
     uniquePayees, byRawPayee, rules, vetted, llm,
     knownPayeeNames, categoryNames, payeeById,
   );
@@ -137,9 +137,13 @@ try {
   console.log(`Transactions:  ${transactions.length}`);
   console.log(`Payees mapped: ${payeeMap.size} / ${uniquePayees.length}`);
 
-  // ── End-of-session: review rules + import ─────────────────────────────────
-  const tagLookup = (cleanPayee: string) => vetted.getTag(cleanPayee);
-  await runEndOfSession(vetted, transactions, payeeMap, tagLookup, accountMapping, actual);
+  if (quit) {
+    console.log(chalk.yellow('\nDecisions saved to vetted-rules.json. Run again to create rules and import.'));
+  } else {
+    // ── End-of-session: review rules + import ───────────────────────────────
+    const tagLookup = (cleanPayee: string) => vetted.getTag(cleanPayee);
+    await runEndOfSession(vetted, transactions, payeeMap, tagLookup, accountMapping, actual);
+  }
 
 } catch (err: any) {
   if (err?.name === 'ExitPromptError') {

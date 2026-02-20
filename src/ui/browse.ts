@@ -61,7 +61,7 @@ export async function browseAndVet(
   knownPayeeNames: string[],
   categoryNames: string[],
   payeeById: Map<string, string>,
-): Promise<Map<string, string>> {
+): Promise<{ payeeMap: Map<string, string>; quit: boolean }> {
 
   // ── Phase 1: compute clean-name proposals in parallel ───────────────────────
 
@@ -171,9 +171,12 @@ export async function browseAndVet(
   console.log(chalk.bold(`\n── ${rows.length} payees  (${newCount} new, ${rows.length - newCount} previously vetted) ─`));
   console.log(chalk.dim('  ✎ = edited this session   · = previously vetted   ✗ = skipped\n'));
 
+  let quit = false;
+
   while (true) {
     const choices = [
-      { name: chalk.bold('Done — accept all and continue'), value: '__done__' },
+      { name: chalk.bold('Done — save decisions and create rules in Actual Budget'), value: '__done__' },
+      { name: chalk.bold('Save decisions and quit (no Actual Budget changes yet)'), value: '__quit__' },
       ...rows.map((row, i) => ({ name: rowLabel(row), value: String(i) })),
     ];
 
@@ -184,6 +187,7 @@ export async function browseAndVet(
     });
 
     if (chosen === '__done__') break;
+    if (chosen === '__quit__') { quit = true; break; }
 
     const row = rows[parseInt(chosen, 10)];
     row.touched = true;
@@ -308,5 +312,5 @@ export async function browseAndVet(
     }
   }
 
-  return payeeMap;
+  return { payeeMap, quit };
 }
