@@ -60,8 +60,9 @@ async function applySuggestions(
   console.log(chalk.bold(`\n── AI Review: ${suggestions.length} suggestion(s) ─────────────────`));
 
   for (const s of suggestions) {
-    const row = rows.find(r => r.cleanPayee.toLowerCase() === s.cleanPayee.toLowerCase());
-    if (!row) continue;
+    // All rows sharing this clean payee name
+    const matchingRows = rows.filter(r => r.cleanPayee.toLowerCase() === s.cleanPayee.toLowerCase());
+    if (matchingRows.length === 0) continue;
 
     console.log('');
 
@@ -96,12 +97,19 @@ async function applySuggestions(
 
     if (s.type === 'split' && s.rawPayees?.length && s.suggestedName) {
       const toSplit = new Set(s.rawPayees.map(r => r.toLowerCase()));
-      const removed = row.rawPayees.filter(r => toSplit.has(r.toLowerCase()));
-      if (removed.length === 0) { console.log(chalk.yellow('  ⚠ None of the listed raw payees found in group — skipped')); continue; }
+      const removed: string[] = [];
 
-      row.rawPayees = row.rawPayees.filter(r => !toSplit.has(r.toLowerCase()));
-      row.txCount = row.rawPayees.reduce((n, r) => n + (byRawPayee.get(r)?.length ?? 0), 0);
-      row.touched = true;
+      // Raw payees can live in any row sharing this clean name — search all of them
+      for (const row of matchingRows) {
+        const taken = row.rawPayees.filter(r => toSplit.has(r.toLowerCase()));
+        if (taken.length === 0) continue;
+        removed.push(...taken);
+        row.rawPayees = row.rawPayees.filter(r => !toSplit.has(r.toLowerCase()));
+        row.txCount = row.rawPayees.reduce((n, r) => n + (byRawPayee.get(r)?.length ?? 0), 0);
+        row.touched = true;
+      }
+
+      if (removed.length === 0) { console.log(chalk.yellow('  ⚠ None of the listed raw payees found — skipped')); continue; }
 
       const newMatchValue = extractMatchValue(removed[0]);
       rows.push({
@@ -121,17 +129,21 @@ async function applySuggestions(
     }
 
     if (s.type === 'rename' && s.suggestedName) {
-      const old = row.cleanPayee;
-      row.cleanPayee = s.suggestedName;
-      row.preRuleKey = `pre:imported_payee:contains:${row.matchValue}:payee:${s.suggestedName}`;
-      row.touched = true;
-      console.log(chalk.green(`  ✓ Renamed "${old}" → "${s.suggestedName}"`));
+      const old = matchingRows[0].cleanPayee;
+      for (const row of matchingRows) {
+        row.cleanPayee = s.suggestedName;
+        row.preRuleKey = `pre:imported_payee:contains:${row.matchValue}:payee:${s.suggestedName}`;
+        row.touched = true;
+      }
+      console.log(chalk.green(`  ✓ Renamed "${old}" → "${s.suggestedName}" (${matchingRows.length} row(s))`));
     }
 
     if (s.type === 'category' && s.suggestedCategory) {
-      row.category = s.suggestedCategory;
-      row.touched = true;
-      console.log(chalk.green(`  ✓ Category → "${s.suggestedCategory}"`));
+      for (const row of matchingRows) {
+        row.category = s.suggestedCategory;
+        row.touched = true;
+      }
+      console.log(chalk.green(`  ✓ Category → "${s.suggestedCategory}" (${matchingRows.length} row(s))`));
     }
 
     // 'flag' type: no automatic change, just shown for awareness
@@ -261,7 +273,15 @@ export async function browseAndVet(
 
   if (runReview) {
     process.stdout.write(chalk.dim('Reviewing groupings for anomalies…'));
-    const groups = rows.map(r => ({ cleanPayee: r.cleanPayee, category: r.category, rawPayees: r.rawPayees }));
+    // Aggregate rows by clean payee name so the LLM sees one entry per
+    // logical payee with ALL raw strings — not separate entries per match pattern.
+    const groupMap = new Map<string, { cleanPayee: string; category: string | null; rawPayees: string[] }>();
+    for (const row of rows) {
+      const key = row.cleanPayee.toLowerCase();
+      if (!groupMap.has(key)) groupMap.set(key, { cleanPayee: row.cleanPayee, category: row.category, rawPayees: [] });
+      groupMap.get(key)!.rawPayees.push(...row.rawPayees);
+    }
+    const groups = [...groupMap.values()];
     const suggestions = await llm.reviewGroupings(groups);
     process.stdout.write('\r' + chalk.dim(`Reviewing groupings for anomalies… ${suggestions.length} suggestion(s) found.\n`));
 
