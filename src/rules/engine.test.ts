@@ -131,6 +131,8 @@ describe('findPreRule', () => {
 
 // ── findCategoryRule ──────────────────────────────────────────────────────────
 
+
+
 describe('findCategoryRule', () => {
   it('matches clean payee name (case-insensitive)', () => {
     expect(findCategoryRule([catRule('is', 'amazon')], 'Amazon')).not.toBeNull();
@@ -149,5 +151,38 @@ describe('findCategoryRule', () => {
     const r1 = catRule('is', 'Amazon', 'c-1');
     const r2 = catRule('is', 'Amazon', 'c-2');
     expect((findCategoryRule([r1, r2], 'Amazon')!.actions[0] as any).value).toBe('c-1');
+  });
+
+  it('ignores post-stage rules even if payee matches', () => {
+    const postRule: Rule = {
+      stage: 'post',
+      conditionsOp: 'and',
+      conditions: [{ op: 'is', field: 'payee', value: 'Amazon', type: 'id' }],
+      actions: [{ op: 'set', field: 'category', value: 'c-post', type: 'id' }],
+    };
+    // findCategoryRule filters to stage === null only, so post-stage is ignored
+    expect(findCategoryRule([postRule], 'Amazon')).toBeNull();
+  });
+});
+
+// ── ruleKey with multi-condition rule ─────────────────────────────────────────
+
+describe('ruleKey — multi-condition rule', () => {
+  it('only uses conditions[0] in the key (documented behavior)', () => {
+    // A rule with two conditions — ruleKey only reflects the first
+    const rule: Rule = {
+      stage: 'pre',
+      conditionsOp: 'and',
+      conditions: [
+        { op: 'contains', field: 'imported_payee', value: 'AMAZON', type: 'string' },
+        { op: 'contains', field: 'imported_payee', value: 'MKTPL', type: 'string' },
+      ],
+      actions: [{ op: 'set', field: 'payee', value: 'p-1', type: 'id' }],
+    };
+    // The key only encodes the first condition value
+    expect(ruleKey(rule)).toBe('pre:imported_payee:contains:AMAZON:payee:p-1');
+    // It does NOT include 'MKTPL' — two different multi-condition rules with the
+    // same first condition would collide. This is a known limitation.
+    expect(ruleKey(rule)).not.toContain('MKTPL');
   });
 });

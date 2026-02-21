@@ -72,4 +72,26 @@ describe('extractMatchValue', () => {
     expect(extractMatchValue('STORE 24')).toBe('STORE 24');
     expect(extractMatchValue('HWY 41')).toBe('HWY 41');
   });
+
+  // ── Edge cases added to improve coverage ─────────────────────────────────
+
+  it('does not strip mid-name numbers like "7-ELEVEN"', () => {
+    // The dash is surrounded by non-whitespace; no rule matches
+    expect(extractMatchValue('7-ELEVEN')).toBe('7-ELEVEN');
+  });
+
+  it('does not strip an all-numeric string', () => {
+    // Rule 6 requires leading whitespace before the digits, so "1234" alone is not stripped
+    expect(extractMatchValue('1234')).toBe('1234');
+  });
+
+  it('does not strip asterisk code when base would be too short', () => {
+    // "T*0C2091XO3" → would strip to "T" (1 char) — minimum guard prevents strip
+    expect(extractMatchValue('T*0C2091XO3')).toBe('T*0C2091XO3');
+  });
+
+  it('strips eight-digit trailing number that looks like a date (rule 6, as-designed)', () => {
+    // Rule 6 strips any 4+ digit trailing number, including 8-digit dates
+    expect(extractMatchValue('PAYROLL 20261215')).toBe('PAYROLL');
+  });
 });

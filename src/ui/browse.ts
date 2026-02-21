@@ -4,6 +4,7 @@ import type { Rule, RawTransaction, VettedRule, LLMAdapter, Suggestion } from '.
 import type { VettedRuleStore } from '../rules/vetted.js';
 import { findPreRule, ruleKey } from '../rules/engine.js';
 import { extractMatchValue } from '../rules/normalize.js';
+import { TAG_CHOICES } from './constants.js';
 
 // Run fn over items with at most `concurrency` in-flight at once.
 export async function withConcurrency<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
@@ -16,14 +17,6 @@ export async function withConcurrency<T>(items: T[], concurrency: number, fn: (i
 }
 
 const LLM_CONCURRENCY = 5;
-
-const TAG_CHOICES = [
-  { name: 'Skip (no tag)', value: '' },
-  { name: 'Fixed          #fixed', value: 'fixed' },
-  { name: 'Discretionary  #discretionary', value: 'discretionary' },
-  { name: 'Subscription   #subscription', value: 'subscription' },
-  { name: 'New tag…', value: '__new__' },
-];
 
 export interface PayeeRow {
   rawPayees: string[];      // raw payees covered by this match pattern

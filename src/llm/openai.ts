@@ -1,30 +1,26 @@
 import OpenAI from 'openai';
-import type { LLMAdapter, GroupForReview, Suggestion } from '../types.js';
+import type { LLMAdapter, GroupForReview, Suggestion, ConsolidationGroup, ConsolidationSuggestion } from '../types.js';
+import { buildProposePayeePrompt, buildProposeCategoryPrompt, buildReviewGroupingsPrompt, buildSuggestConsolidationPrompt } from './prompts.js';
+
+const DEFAULT_FAST_MODEL   = 'gpt-4o-mini';
+const DEFAULT_REVIEW_MODEL = 'gpt-4o';
 
 export class OpenAIAdapter implements LLMAdapter {
   private client: OpenAI;
-  private model = 'gpt-4o-mini'; // fast + cheap for bulk guessing
+  private fastModel: string;
+  private reviewModel: string;
 
-  constructor(apiKey: string) {
-    this.client = new OpenAI({ apiKey });
+  constructor(apiKey: string, opts: { fastModel?: string; reviewModel?: string } = {}) {
+    this.client      = new OpenAI({ apiKey });
+    this.fastModel   = opts.fastModel   ?? DEFAULT_FAST_MODEL;
+    this.reviewModel = opts.reviewModel ?? DEFAULT_REVIEW_MODEL;
   }
 
   async proposePayee(rawPayee: string, knownPayees: string[]): Promise<string> {
-    const known = knownPayees.length > 0
-      ? `Known payees (prefer reusing these if appropriate):\n${knownPayees.join(', ')}`
-      : '';
-
     const response = await this.client.chat.completions.create({
-      model: this.model,
+      model: this.fastModel,
       max_tokens: 64,
-      messages: [{
-        role: 'user',
-        content: `Convert this raw bank transaction payee name to a clean, human-readable name.
-Return ONLY the clean name, nothing else.
-
-Raw payee: "${rawPayee}"
-${known}`,
-      }],
+      messages: [{ role: 'user', content: buildProposePayeePrompt(rawPayee, knownPayees) }],
     });
 
     return response.choices[0].message.content?.trim() ?? rawPayee;
@@ -32,31 +28,23 @@ ${known}`,
 
   async proposeCategory(cleanPayee: string, categories: string[]): Promise<string> {
     const response = await this.client.chat.completions.create({
-      model: this.model,
+      model: this.fastModel,
       max_tokens: 64,
-      messages: [{
-        role: 'user',
-        content: `Which category best fits this payee? Return ONLY the category name, nothing else.
-
-Payee: "${cleanPayee}"
-Categories: ${categories.join(', ')}`,
-      }],
+      messages: [{ role: 'user', content: buildProposeCategoryPrompt(cleanPayee, categories) }],
     });
 
     return response.choices[0].message.content?.trim() ?? categories[0];
   }
 
   async reviewGroupings(groups: GroupForReview[]): Promise<Suggestion[]> {
-    // Only groups with multiple raw payees can have a miscategorization — skip singletons
-    const multiGroups = groups.filter(g => g.rawPayees.length > 1);
-    if (multiGroups.length === 0) return [];
+    if (groups.length === 0) return [];
 
-    const groupText = multiGroups
+    const groupText = groups
       .map(g => `- "${g.cleanPayee}" (${g.category ?? 'no category'}): ${g.rawPayees.join(' | ')}`)
       .join('\n');
 
     const response = await this.client.chat.completions.create({
-      model: 'gpt-4o',
+      model: this.reviewModel,
       max_tokens: 4096,
       tools: [{
         type: 'function',
@@ -87,23 +75,7 @@ Categories: ${categories.join(', ')}`,
         },
       }],
       tool_choice: { type: 'function', function: { name: 'report_anomalies' } },
-      messages: [{
-        role: 'user',
-        content: `You are reviewing bank transaction payee groupings for a personal finance app. Each line shows: clean name (category): raw bank strings that map to it.
-
-Actively look for and flag these patterns:
-
-- SPLIT: raw payees in the same group that represent meaningfully different merchants or expense types (e.g. "AMAZON FRESH" mixed with "AMAZON MKTPL" — groceries vs shopping; or multiple distinct gas station brands like "CASEY'S", "KWIK TRIP", "SHELL" all collapsed under one name — each brand should be its own payee)
-- RENAME: the clean name is a generic category word ("Gas Station", "Restaurant", "Store") instead of the actual merchant name, or is unclear/too abbreviated
-- CATEGORY: the assigned category seems wrong for the merchant type
-- FLAG: transfers between accounts disguised as expenses (e.g. "AUTOMATIC PAYMENT", "ONLINE PAYMENT"), or other notable issues
-
-Key rule: different businesses should never share a clean name, even if they're in the same industry. "Shell" and "Casey's" and "Kwik Trip" are different payees that happen to sell gas — they should not be merged.
-
-Be thorough. Flag every issue you find.
-
-${groupText}`,
-      }],
+      messages: [{ role: 'user', content: buildReviewGroupingsPrompt(groupText) }],
     });
 
     if (response.choices[0].finish_reason === 'length') {
@@ -113,5 +85,49 @@ ${groupText}`,
     const toolCall = response.choices[0].message.tool_calls?.[0];
     if (!toolCall || toolCall.type !== 'function') return [];
     return (JSON.parse(toolCall.function.arguments).suggestions as Suggestion[]) ?? [];
+  }
+
+  async suggestConsolidation(groups: ConsolidationGroup[]): Promise<ConsolidationSuggestion[]> {
+    if (groups.length === 0) return [];
+
+    const groupText = groups
+      .map(g => `- "${g.actionValue}": ${g.matchValues.map(v => `"${v}"`).join(', ')}`)
+      .join('\n');
+
+    const response = await this.client.chat.completions.create({
+      model: this.reviewModel,
+      max_tokens: 2048,
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'report_consolidations',
+          description: 'Report suggested consolidations for payee match patterns',
+          parameters: {
+            type: 'object',
+            properties: {
+              consolidations: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    actionValue:          { type: 'string', description: 'The clean payee name (exactly as given)' },
+                    suggestedMatchValue:  { type: 'string', description: 'A single contains-pattern that matches all variants' },
+                    reason:               { type: 'string', description: 'One sentence explanation' },
+                  },
+                  required: ['actionValue', 'suggestedMatchValue', 'reason'],
+                },
+              },
+            },
+            required: ['consolidations'],
+          },
+        },
+      }],
+      tool_choice: { type: 'function', function: { name: 'report_consolidations' } },
+      messages: [{ role: 'user', content: buildSuggestConsolidationPrompt(groupText) }],
+    });
+
+    const toolCall = response.choices[0].message.tool_calls?.[0];
+    if (!toolCall || toolCall.type !== 'function') return [];
+    return (JSON.parse(toolCall.function.arguments).consolidations as ConsolidationSuggestion[]) ?? [];
   }
 }

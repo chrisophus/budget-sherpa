@@ -94,10 +94,22 @@ export interface Suggestion {
   reason: string;
 }
 
+export interface ConsolidationGroup {
+  actionValue: string;   // clean payee name shared by all rules
+  matchValues: string[]; // current match patterns (2+)
+}
+
+export interface ConsolidationSuggestion {
+  actionValue: string;         // identifies which group this applies to
+  suggestedMatchValue: string; // the proposed consolidated match pattern
+  reason: string;
+}
+
 export interface LLMAdapter {
   proposePayee(rawPayee: string, knownPayees: string[]): Promise<string>;
   proposeCategory(cleanPayee: string, categories: string[]): Promise<string>;
   reviewGroupings(groups: GroupForReview[]): Promise<Suggestion[]>;
+  suggestConsolidation(groups: ConsolidationGroup[]): Promise<ConsolidationSuggestion[]>;
 }
 
 // --- Config ---
@@ -111,4 +123,10 @@ export interface Config {
   anthropicApiKey?: string;
   openaiApiKey?: string;
   vettedRulesPath: string;
+  dryRun: boolean;
+  // Model overrides (optional — defaults are hardcoded in each adapter)
+  anthropicFastModel?: string;
+  anthropicReviewModel?: string;
+  openaiModel?: string;
+  openaiReviewModel?: string;
 }

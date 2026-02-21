@@ -59,6 +59,15 @@ describe('withConcurrency', () => {
     expect(results.sort()).toEqual([1, 2]);
   });
 
+  it('propagates errors thrown by the worker function', async () => {
+    const boom = new Error('worker failed');
+    await expect(
+      withConcurrency([1, 2, 3], 2, async n => {
+        if (n === 2) throw boom;
+      }),
+    ).rejects.toThrow('worker failed');
+  });
+
   it('limits in-flight count', async () => {
     let inFlight = 0;
     let maxInFlight = 0;
@@ -159,6 +168,32 @@ describe('applySuggestions', () => {
     expect(newRow.touched).toBe(true);
   });
 
+  it('split — new row has category set when suggestedCategory is provided', async () => {
+    const byRawPayee = new Map([
+      ['AMAZON FRESH 1', makeTx('AMAZON FRESH 1', 2)],
+      ['AMAZON MKTPL 1', makeTx('AMAZON MKTPL 1', 3)],
+    ]);
+    const rows = [makeRow({
+      cleanPayee: 'Amazon',
+      rawPayees: ['AMAZON FRESH 1', 'AMAZON MKTPL 1'],
+      txCount: 5,
+    })];
+
+    vi.mocked(select).mockResolvedValue('accept');
+    await applySuggestions([{
+      type: 'split',
+      cleanPayee: 'Amazon',
+      rawPayees: ['AMAZON FRESH 1'],
+      suggestedName: 'Amazon Fresh',
+      suggestedCategory: 'Groceries',
+      reason: 'Different category',
+    }], rows, byRawPayee);
+
+    const newRow = rows[1];
+    expect(newRow.cleanPayee).toBe('Amazon Fresh');
+    expect(newRow.category).toBe('Groceries');
+  });
+
   it('split — warns and skips when raw payees not found', async () => {
     const rows = [makeRow({ cleanPayee: 'Gas Station', rawPayees: ['SINCLAIR'] })];
     vi.mocked(select).mockResolvedValue('accept');
@@ -254,6 +289,38 @@ describe('saveDecisions', () => {
 
       expect(store.isVetted(oldKey)).toBe(false); // old rule removed by empty-row cleanup
       expect(store.findPayeeRule('CONOCO MART #12')?.actionValue).toBe('Conoco');
+    } finally { cleanup(); }
+  });
+
+  it('touched row with category creates a category rule in the store', () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      const row = makeRow({
+        rawPayees: ['STARBUCKS 123'],
+        cleanPayee: 'Starbucks',
+        category: 'Food',
+        touched: true,
+        wasVetted: false,
+      });
+      saveDecisions([row], store, []);
+      expect(store.findCategoryRule('Starbucks')?.actionValue).toBe('Food');
+    } finally { cleanup(); }
+  });
+
+  it('tagDecided: true with tag: null calls setTag(payee, null)', () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      const row = makeRow({
+        cleanPayee: 'Starbucks',
+        tag: null,
+        tagDecided: true,
+        touched: true,
+        wasVetted: false,
+      });
+      saveDecisions([row], store, []);
+      // null tag is stored explicitly — hasTag is true, getTag returns null
+      expect(store.hasTag('Starbucks')).toBe(true);
+      expect(store.getTag('Starbucks')).toBeNull();
     } finally { cleanup(); }
   });
 

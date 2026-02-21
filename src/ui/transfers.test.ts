@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { findTransferPairs, daysBetween, DATE_TOLERANCE_DAYS } from './transfers.js';
+import { findTransferPairs, daysBetween, formatAmount, DATE_TOLERANCE_DAYS } from './transfers.js';
 
 interface Tx {
   id: string;
@@ -12,6 +12,17 @@ interface Tx {
 function tx(id: string, date: string, amount: number): Tx {
   return { id, date, amount };
 }
+
+describe('formatAmount', () => {
+  it('converts cents to dollar display string', () => {
+    expect(formatAmount(19900)).toBe('$199.00');
+    expect(formatAmount(500)).toBe('$5.00');
+  });
+
+  it('handles negative amounts (shows absolute value)', () => {
+    expect(formatAmount(-19900)).toBe('$199.00');
+  });
+});
 
 describe('daysBetween', () => {
   it('returns 0 for same date', () => {
@@ -82,6 +93,28 @@ describe('findTransferPairs', () => {
       ]],
     ]);
     expect(findTransferPairs(txsByAccount, accountNames)).toHaveLength(1);
+  });
+
+  it('three-account chain: each transaction matches at most once', () => {
+    // A pays B, B pays C — B has two txs with the same amount (one in, one out).
+    // The +10000 in B should pair with A's -10000, and B's -10000 should pair with C's +10000.
+    const accountNames = new Map([['A', 'Account A'], ['B', 'Account B'], ['C', 'Account C']]);
+    const txsByAccount = new Map<string, Tx[]>([
+      ['A', [tx('A1', '2026-01-20', -10000)]],
+      ['B', [tx('B1', '2026-01-20', 10000), tx('B2', '2026-01-21', -10000)]],
+      ['C', [tx('C1', '2026-01-21', 10000)]],
+    ]);
+    const pairs = findTransferPairs(txsByAccount, accountNames);
+    expect(pairs).toHaveLength(2);
+
+    // Verify each transaction appears in at most one pair
+    const usedIds = new Set<string>();
+    for (const p of pairs) {
+      expect(usedIds.has(p.outTx.id)).toBe(false);
+      expect(usedIds.has(p.inTx.id)).toBe(false);
+      usedIds.add(p.outTx.id);
+      usedIds.add(p.inTx.id);
+    }
   });
 
   it('handles multiple distinct pairs', () => {

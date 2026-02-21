@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { parseQfx, parseQfxMeta } from './qfx.js';
+import { parseQfx, parseQfxFiles, parseQfxMeta } from './qfx.js';
 
 // Minimal QFX fixture builder
 function makeQfx(opts: {
@@ -97,6 +97,37 @@ describe('parseQfx', () => {
     withTempFile(qfx, path => {
       expect(parseQfx(path)).toHaveLength(0);
     });
+  });
+});
+
+describe('parseQfx — robustness', () => {
+  it('handles CRLF line endings (Windows)', () => {
+    // Replace all \n with \r\n to simulate Windows file
+    const qfx = makeQfx({
+      acctId: 'CRLF001',
+      transactions: [{ id: 'TX1', name: 'WALMART', amount: '-25.00', date: '20260201' }],
+    }).replace(/\n/g, '\r\n');
+    withTempFile(qfx, path => {
+      const txs = parseQfx(path);
+      expect(txs).toHaveLength(1);
+      expect(txs[0].account).toBe('CRLF001');
+      expect(txs[0].rawPayee).toBe('WALMART');
+    });
+  });
+
+  it('parses amount with leading whitespace', () => {
+    const qfx = makeQfx({
+      transactions: [{ id: 'TX1', name: 'NETFLIX', amount: '   -15.99', date: '20260201' }],
+    });
+    withTempFile(qfx, path => {
+      expect(parseQfx(path)[0].amount).toBe(-15.99);
+    });
+  });
+});
+
+describe('parseQfxFiles', () => {
+  it('returns empty array for empty input', () => {
+    expect(parseQfxFiles([])).toEqual([]);
   });
 });
 

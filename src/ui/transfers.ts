@@ -53,8 +53,8 @@ export function findTransferPairs(
   return pairs;
 }
 
-function formatAmount(milliunits: number): string {
-  return `$${(Math.abs(milliunits) / 1000).toFixed(2)}`;
+export function formatAmount(cents: number): string {
+  return `$${(Math.abs(cents) / 100).toFixed(2)}`;
 }
 
 interface Tx {

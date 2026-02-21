@@ -1,7 +1,11 @@
-import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { buildTxPayload, createRulesInActual } from './session.js';
-import type { RawTransaction, VettedRule } from '../types.js';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { buildTxPayload, createRulesInActual, consolidateVettedRules } from './session.js';
+import type { RawTransaction, VettedRule, LLMAdapter, ConsolidationSuggestion } from '../types.js';
 import type { ActualClient } from '../actual/client.js';
+import { VettedRuleStore } from '../rules/vetted.js';
 
 function makeTx(overrides: Partial<RawTransaction> = {}): RawTransaction {
   return {
@@ -33,6 +37,13 @@ describe('buildTxPayload', () => {
     // Some banks emit amounts like -5.999 due to FX; should round to nearest cent
     const result = buildTxPayload(makeTx({ amount: -5.999 }), new Map(), noTag, noCat, new Map());
     expect(result.amount).toBe(-600);
+  });
+
+  it('rounds -0.005 boundary to effectively zero', () => {
+    // -0.005 * 100 rounds to 0 or -0 depending on floating point;
+    // either way Math.abs of the result is 0.
+    const result = buildTxPayload(makeTx({ amount: -0.005 }), new Map(), noTag, noCat, new Map());
+    expect(Math.abs(result.amount as number)).toBe(0);
   });
 
   it('converts date from YYYYMMDD to YYYY-MM-DD', () => {
@@ -106,7 +117,7 @@ function makeCatRule(matchValue: string, actionValue: string): VettedRule {
 }
 
 function mockActual(opts: {
-  payees?: Array<{ id: string; name: string }>;
+  payees?: Array<{ id: string; name: string; transfer_acct?: string }>;
   categories?: Array<{ id: string; name: string; group_id: string }>;
 } = {}): ActualClient {
   return {
@@ -176,6 +187,39 @@ describe('createRulesInActual', () => {
     expect(actual.createRule).toHaveBeenCalledWith(expect.objectContaining({ stage: 'pre' }));
   });
 
+  it('dry-run: does not call actual.createRule', async () => {
+    const actual = mockActual({
+      categories: [{ id: 'cat-shopping', name: 'Shopping', group_id: 'g1' }],
+    });
+    const rules = [makePreRule('AMAZON', 'Amazon'), makeCatRule('Amazon', 'Shopping')];
+    await createRulesInActual(rules, () => null, actual, /* dryRun= */ true);
+    expect(actual.createRule).not.toHaveBeenCalled();
+  });
+
+  it('skips pre-rule when actionValue matches a transfer payee name', async () => {
+    // "Chase Checking" is both a payee rule target AND a transfer payee name
+    const actual = mockActual({
+      payees: [{ id: 'transfer-payee-id', name: 'Chase Checking', transfer_acct: 'acct-001' }],
+    });
+    await createRulesInActual([makePreRule('CHASE', 'Chase Checking')], () => null, actual);
+    // Should NOT create a rule for a transfer payee
+    expect(actual.createRule).not.toHaveBeenCalled();
+  });
+
+  it('does NOT create a tag rule when payee has a tag but no category rule', async () => {
+    // Tag rules are created inside the category-rule loop; without a category rule,
+    // no tag rule is emitted. This is documented as current behavior.
+    const actual = mockActual({
+      categories: [{ id: 'cat-food', name: 'Food', group_id: 'g1' }],
+    });
+    // Only a pre-rule, no category rule
+    const rules = [makePreRule('STARBUCKS', 'Starbucks')];
+    await createRulesInActual(rules, () => 'discretionary', actual);
+    // Only one rule created (pre), no tag rule
+    expect(actual.createRule).toHaveBeenCalledTimes(1);
+    expect(actual.createRule).toHaveBeenCalledWith(expect.objectContaining({ stage: 'pre' }));
+  });
+
   it('creates an additional tag rule when payee has a tag', async () => {
     const actual = mockActual({
       categories: [{ id: 'cat-shopping', name: 'Shopping', group_id: 'g1' }],
@@ -188,5 +232,155 @@ describe('createRulesInActual', () => {
     expect(actual.createRule).toHaveBeenCalledWith(expect.objectContaining({
       actions: [expect.objectContaining({ op: 'append-notes', value: '#discretionary' })],
     }));
+  });
+});
+
+// ── consolidateVettedRules ────────────────────────────────────────────────────
+
+// Mock inquirer for consolidation tests (same pattern as browse.test.ts)
+vi.mock('@inquirer/prompts', () => ({
+  select: vi.fn(),
+  input:  vi.fn(),
+  confirm: vi.fn(),
+}));
+
+import { select } from '@inquirer/prompts';
+
+function tmpStore() {
+  const path = join(tmpdir(), `vetted-session-${Date.now()}.json`);
+  const store = new VettedRuleStore(path);
+  const cleanup = () => { if (existsSync(path)) unlinkSync(path); };
+  return { store, cleanup };
+}
+
+function mockLlm(suggestions: ConsolidationSuggestion[]): LLMAdapter {
+  return {
+    proposePayee:         vi.fn(),
+    proposeCategory:      vi.fn(),
+    reviewGroupings:      vi.fn(),
+    suggestConsolidation: vi.fn().mockResolvedValue(suggestions),
+  } as unknown as LLMAdapter;
+}
+
+function seedPreRule(store: VettedRuleStore, matchValue: string, actionValue: string) {
+  store.approve({
+    key: `pre:imported_payee:contains:${matchValue}:payee:${actionValue}`,
+    stage: 'pre', matchField: 'imported_payee', matchOp: 'contains',
+    matchValue, actionField: 'payee', actionValue,
+    vettedAt: new Date().toISOString(),
+  });
+}
+
+describe('consolidateVettedRules', () => {
+  beforeEach(() => {
+    vi.mocked(select).mockReset();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does nothing when all payees have only one rule', async () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      seedPreRule(store, 'AMAZON MKTPL', 'Amazon');
+      const llm = mockLlm([]);
+      await consolidateVettedRules(store, llm);
+      expect(llm.suggestConsolidation).not.toHaveBeenCalled();
+    } finally { cleanup(); }
+  });
+
+  it('accepts suggested consolidation and replaces old rules with one', async () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      seedPreRule(store, 'CAPITAL ONE CRCARDPMT 43FA', 'Capital One Credit Card Payment');
+      seedPreRule(store, 'CAPITAL ONE CRCARDPMT 43S6', 'Capital One Credit Card Payment');
+
+      const llm = mockLlm([{
+        actionValue: 'Capital One Credit Card Payment',
+        suggestedMatchValue: 'CAPITAL ONE CRCARDPMT',
+        reason: 'Shares a common prefix',
+      }]);
+
+      vi.mocked(select).mockResolvedValue('accept');
+      await consolidateVettedRules(store, llm);
+
+      const preRules = store.getAllRules().filter(r => r.stage === 'pre');
+      expect(preRules).toHaveLength(1);
+      expect(preRules[0].matchValue).toBe('CAPITAL ONE CRCARDPMT');
+      expect(preRules[0].actionValue).toBe('Capital One Credit Card Payment');
+    } finally { cleanup(); }
+  });
+
+  it('skips when user chooses skip', async () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      seedPreRule(store, 'PAYPAL INST XFER 1234', 'PayPal');
+      seedPreRule(store, 'PAYPAL INST XFER 5678', 'PayPal');
+
+      const llm = mockLlm([{
+        actionValue: 'PayPal',
+        suggestedMatchValue: 'PAYPAL INST XFER',
+        reason: 'Shared prefix',
+      }]);
+
+      vi.mocked(select).mockResolvedValue('skip');
+      await consolidateVettedRules(store, llm);
+
+      // Old rules unchanged
+      expect(store.getAllRules().filter(r => r.stage === 'pre')).toHaveLength(2);
+    } finally { cleanup(); }
+  });
+
+  it('allows editing the suggested pattern', async () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      seedPreRule(store, 'PAYPAL INST XFER 1234', 'PayPal');
+      seedPreRule(store, 'PAYPAL INST XFER 5678', 'PayPal');
+
+      const { input: mockInput } = await import('@inquirer/prompts') as any;
+
+      const llm = mockLlm([{
+        actionValue: 'PayPal',
+        suggestedMatchValue: 'PAYPAL INST XFER',
+        reason: 'Shared prefix',
+      }]);
+
+      vi.mocked(select).mockResolvedValue('edit');
+      mockInput.mockResolvedValue('PAYPAL');
+
+      await consolidateVettedRules(store, llm);
+
+      const preRules = store.getAllRules().filter(r => r.stage === 'pre');
+      expect(preRules).toHaveLength(1);
+      expect(preRules[0].matchValue).toBe('PAYPAL');
+    } finally { cleanup(); }
+  });
+
+  it('sends only groups with 2+ rules to the LLM', async () => {
+    const { store, cleanup } = tmpStore();
+    try {
+      // Amazon: 2 rules (consolidation candidate)
+      seedPreRule(store, 'AMAZON MKTPL 1234', 'Amazon');
+      seedPreRule(store, 'AMAZON COM 5678', 'Amazon');
+      // Netflix: 1 rule (not a candidate)
+      seedPreRule(store, 'NETFLIX', 'Netflix');
+
+      const llm = mockLlm([]);
+      vi.mocked(select).mockResolvedValue('skip');
+      await consolidateVettedRules(store, llm);
+
+      expect(llm.suggestConsolidation).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({ actionValue: 'Amazon', matchValues: expect.arrayContaining(['AMAZON MKTPL 1234', 'AMAZON COM 5678']) }),
+        ]),
+      );
+      // Netflix should NOT be in the call
+      expect(llm.suggestConsolidation).toHaveBeenCalledWith(
+        expect.not.arrayContaining([
+          expect.objectContaining({ actionValue: 'Netflix' }),
+        ]),
+      );
+    } finally { cleanup(); }
   });
 });

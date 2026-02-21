@@ -94,6 +94,19 @@ set -a && source .env && set +a
 npm run dev -- --dir /path/to/qfx/files
 ```
 
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dir <path>` | `.` (current directory) | Directory containing QFX/OFX files |
+| `--skip-transfers` | off | Skip transfer detection after import |
+| `--dry-run` | off | Preview all changes without writing to Actual Budget |
+
+```bash
+# Preview without making any changes
+npm run dev -- --dir /path/to/qfx/files --dry-run
+```
+
 Budget Sherpa will:
 
 1. Connect to your Actual Budget server (auto-recovers if the local cache is stale)
@@ -118,11 +131,15 @@ src/
     normalize.ts        — match pattern extraction (strips trailing codes)
     vetted.ts           — approved rule + tag persistence
   llm/
-    anthropic.ts        — Anthropic adapter (Haiku for individual proposals, Sonnet for AI review)
+    anthropic.ts        — Anthropic adapter (Haiku for proposals, Sonnet for AI review)
+    openai.ts           — OpenAI adapter (gpt-4o-mini for proposals, gpt-4o for AI review)
+    prompts.ts          — shared LLM prompt builders
   actual/
     client.ts           — Actual Budget API wrapper
+  cli/
+    args.ts             — CLI argument parsing (--dir, --skip-transfers, --dry-run)
   ui/
-    vetting.ts          — three-stage interactive vetting loop (clean → category → tag)
+    constants.ts        — shared UI constants (TAG_CHOICES)
     browse.ts           — interactive payee table + AI review pass (batch LLM suggestions)
     session.ts          — end-of-session flow (rules, import, transfers)
     transfers.ts        — post-import transfer detection and linking
@@ -131,12 +148,26 @@ src/
 
 ## LLM providers
 
-Budget Sherpa ships with an Anthropic adapter using two models:
+Budget Sherpa ships with two adapters:
 
-- **Claude Haiku** — individual payee name and category proposals during the vetting loop (fast, low cost, runs per payee)
-- **Claude Sonnet** — the AI review pass after vetting is complete (higher quality batch analysis of all decisions)
+**Anthropic** (default when `ANTHROPIC_API_KEY` is set):
+- **Claude Haiku** — individual payee name and category proposals (fast, low cost, runs per payee)
+- **Claude Sonnet** — AI review pass (higher quality batch analysis)
 
-To use a different provider, implement the `LLMAdapter` interface in `src/llm/` and swap it in `src/index.ts`.
+**OpenAI** (used when `OPENAI_API_KEY` is set, or `LLM_PROVIDER=openai`):
+- **gpt-4o-mini** — proposals
+- **gpt-4o** — AI review
+
+Override models via environment variables (see `.env.example`):
+
+```env
+ANTHROPIC_FAST_MODEL=claude-haiku-4-5-20251001
+ANTHROPIC_REVIEW_MODEL=claude-sonnet-4-6
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_REVIEW_MODEL=gpt-4o
+```
+
+To add another provider, implement the `LLMAdapter` interface in `src/llm/` and swap it in `src/index.ts`.
 
 ## Supported file formats
 

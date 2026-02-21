@@ -98,4 +98,21 @@ describe('VettedRuleStore', () => {
     store.removeTag('Amazon');
     expect(store.hasTag('Amazon')).toBe(false);
   });
+
+  it('migrates old format without tags field — hasTag returns false, getTag returns null', () => {
+    // Write a store with rules but no tags key (old format)
+    const oldFormat = JSON.stringify({ version: 1, rules: {} });
+    writeFileSync(path, oldFormat, 'utf-8');
+    const migrated = new VettedRuleStore(path);
+    expect(migrated.hasTag('Amazon')).toBe(false);
+    expect(migrated.getTag('Amazon')).toBeNull();
+  });
+
+  it('getSessionRules() is empty after approve() then remove() for same key', () => {
+    const rule = makeRule();
+    store.approve(rule);
+    expect(store.getSessionRules()).toHaveLength(1);
+    store.remove(rule.key);
+    expect(store.getSessionRules()).toHaveLength(0);
+  });
 });

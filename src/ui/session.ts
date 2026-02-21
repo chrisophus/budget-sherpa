@@ -1,19 +1,12 @@
 import { input, select, confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
-import type { VettedRule, RawTransaction } from '../types.js';
+import type { VettedRule, RawTransaction, LLMAdapter } from '../types.js';
 import type { VettedRuleStore } from '../rules/vetted.js';
 import type { ActualClient } from '../actual/client.js';
 import { detectAndLinkTransfers } from './transfers.js';
+import { TAG_CHOICES } from './constants.js';
 
 // ── Edit session decisions ─────────────────────────────────────────────────────
-
-const TAG_CHOICES = [
-  { name: 'Skip (no tag)', value: '' },
-  { name: 'Fixed          #fixed', value: 'fixed' },
-  { name: 'Discretionary  #discretionary', value: 'discretionary' },
-  { name: 'Subscription   #subscription', value: 'subscription' },
-  { name: 'New tag…', value: '__new__' },
-];
 
 async function editSessionDecisions(
   vetted: VettedRuleStore,
@@ -165,12 +158,21 @@ export async function createRulesInActual(
   rules: VettedRule[],
   tagLookup: (cleanPayee: string) => string | null,
   actual: ActualClient,
+  dryRun = false,
 ): Promise<void> {
-  const [payees, categories] = await Promise.all([
-    actual.getPayees(),
+  const [rawPayees, categories] = await Promise.all([
+    actual.getPayees() as Promise<Array<{ id: string; name: string; transfer_acct?: string }>>,
     actual.getCategories(),
   ]);
 
+  // Exclude transfer payees (one per account, same name as the account) so rules never
+  // accidentally resolve to them. A payee named "Chase Checking" matching the transfer
+  // payee for the Chase Checking account would cause Actual Budget to auto-create a
+  // mirror transaction on the other side, producing phantom credits/debits.
+  const transferPayeeNames = new Set(
+    rawPayees.filter(p => p.transfer_acct).map(p => p.name.toLowerCase()),
+  );
+  const payees = rawPayees.filter(p => !p.transfer_acct);
   const payeeByName = new Map(payees.map(p => [p.name.toLowerCase(), p.id]));
   const categoryByName = new Map(categories.map(c => [c.name.toLowerCase(), c.id]));
 
@@ -178,10 +180,19 @@ export async function createRulesInActual(
 
   // Pass 1: pre-stage payee cleaning rules (may create new payees)
   for (const rule of rules.filter(r => r.stage === 'pre')) {
+    if (transferPayeeNames.has(rule.actionValue.toLowerCase())) {
+      console.log(chalk.yellow(`  ⚠ Skipping rule for "${rule.actionValue}" — matches an account name (transfer payee). Use transfer detection instead.`));
+      continue;
+    }
     let payeeId = payeeByName.get(rule.actionValue.toLowerCase());
     if (!payeeId) {
       payeeId = await actual.createPayee(rule.actionValue);
       payeeByName.set(rule.actionValue.toLowerCase(), payeeId);
+    }
+    if (dryRun) {
+      console.log(chalk.dim(`  [dry-run] would create [pre] ${rule.matchValue} → ${rule.actionValue}`));
+      created++;
+      continue;
     }
     try {
       await actual.createRule({
@@ -213,33 +224,43 @@ export async function createRulesInActual(
 
     const condition = { op: 'is', field: 'payee', value: payeeId, type: 'id' } as const;
 
-    try {
-      await actual.createRule({
-        stage: null,
-        conditionsOp: 'and',
-        conditions: [condition],
-        actions: [{ op: 'set', field: 'category', value: categoryId, type: 'id' }],
-      });
+    if (dryRun) {
+      console.log(chalk.dim(`  [dry-run] would create [cat] ${rule.matchValue} → ${rule.actionValue}`));
       created++;
-      console.log(chalk.green(`  ✓ [cat] ${rule.matchValue} → ${rule.actionValue}`));
-    } catch (err: any) {
-      console.log(chalk.red(`  ✗ [cat] ${rule.matchValue}: ${err.message ?? err}`));
-    }
-
-    // Create a notes/tag rule if this payee has a tag
-    const tag = tagLookup(rule.matchValue);
-    if (tag) {
+    } else {
       try {
         await actual.createRule({
           stage: null,
           conditionsOp: 'and',
           conditions: [condition],
-          actions: [{ op: 'append-notes', field: 'notes', value: `#${tag}`, type: 'string' }],
+          actions: [{ op: 'set', field: 'category', value: categoryId, type: 'id' }],
         });
         created++;
-        console.log(chalk.green(`  ✓ [tag] ${rule.matchValue} → #${tag}`));
+        console.log(chalk.green(`  ✓ [cat] ${rule.matchValue} → ${rule.actionValue}`));
       } catch (err: any) {
-        console.log(chalk.red(`  ✗ [tag] ${rule.matchValue}: ${err.message ?? err}`));
+        console.log(chalk.red(`  ✗ [cat] ${rule.matchValue}: ${err.message ?? err}`));
+      }
+    }
+
+    // Create a notes/tag rule if this payee has a tag
+    const tag = tagLookup(rule.matchValue);
+    if (tag) {
+      if (dryRun) {
+        console.log(chalk.dim(`  [dry-run] would create [tag] ${rule.matchValue} → #${tag}`));
+        created++;
+      } else {
+        try {
+          await actual.createRule({
+            stage: null,
+            conditionsOp: 'and',
+            conditions: [condition],
+            actions: [{ op: 'append-notes', field: 'notes', value: `#${tag}`, type: 'string' }],
+          });
+          created++;
+          console.log(chalk.green(`  ✓ [tag] ${rule.matchValue} → #${tag}`));
+        } catch (err: any) {
+          console.log(chalk.red(`  ✗ [tag] ${rule.matchValue}: ${err.message ?? err}`));
+        }
       }
     }
   }
@@ -285,6 +306,7 @@ async function importTransactions(
   categoryLookup: (cleanPayee: string) => string | null,
   accountMapping: Map<string, string>,
   actual: ActualClient,
+  dryRun = false,
 ): Promise<void> {
   const categories = await actual.getCategories();
   const categoryIdByName = new Map(categories.map(c => [c.name.toLowerCase(), c.id]));
@@ -298,6 +320,12 @@ async function importTransactions(
     const payload = acctTxs.map(tx =>
       buildTxPayload(tx, payeeMap, tagLookup, categoryLookup, categoryIdByName)
     );
+
+    if (dryRun) {
+      console.log(chalk.dim(`  [dry-run] would import ${payload.length} transactions → account …${qfxAcctId.slice(-4)}`));
+      totalAdded += payload.length;
+      continue;
+    }
 
     try {
       const result = await actual.importTransactions(actualAcctId, payload);
@@ -316,7 +344,100 @@ async function importTransactions(
   }
 
   const dupesSummary = totalUpdated > 0 ? `, ${totalUpdated} duplicates skipped` : '';
-  console.log(chalk.bold.green(`\n✓ Import complete: ${totalAdded} new transactions${dupesSummary}`));
+  if (dryRun) {
+    console.log(chalk.bold.yellow(`\n[dry-run] would import ${totalAdded} new transactions`));
+  } else {
+    console.log(chalk.bold.green(`\n✓ Import complete: ${totalAdded} new transactions${dupesSummary}`));
+  }
+}
+
+// ── Rule consolidation ────────────────────────────────────────────────────────
+
+// Exported for testing. Finds pre-stage rules that share an actionValue (same clean
+// payee name) but have different matchValues, and asks the LLM to suggest a single
+// consolidated match pattern for each group.
+export async function consolidateVettedRules(
+  vetted: VettedRuleStore,
+  llm: LLMAdapter,
+): Promise<void> {
+  // Group pre-stage rules by actionValue (clean payee name)
+  const allPreRules = vetted.getAllRules().filter(r => r.stage === 'pre');
+  const byAction = new Map<string, VettedRule[]>();
+  for (const rule of allPreRules) {
+    const key = rule.actionValue.toLowerCase();
+    if (!byAction.has(key)) byAction.set(key, []);
+    byAction.get(key)!.push(rule);
+  }
+
+  // Only groups with 2+ distinct match patterns are consolidation candidates
+  const groups = [...byAction.values()].filter(g => g.length > 1);
+
+  if (groups.length === 0) {
+    console.log(chalk.dim('  No consolidation candidates found.'));
+    return;
+  }
+
+  console.log(chalk.dim(`  Found ${groups.length} payee(s) with multiple match patterns — asking AI for suggestions…`));
+
+  const suggestions = await llm.suggestConsolidation(
+    groups.map(g => ({ actionValue: g[0].actionValue, matchValues: g.map(r => r.matchValue) })),
+  );
+
+  if (suggestions.length === 0) {
+    console.log(chalk.dim('  No consolidation suggestions returned.'));
+    return;
+  }
+
+  for (const s of suggestions) {
+    const group = groups.find(g => g[0].actionValue.toLowerCase() === s.actionValue.toLowerCase());
+    if (!group) continue;
+
+    console.log('');
+    console.log(`${chalk.bold.cyan('[CONSOLIDATE]')}  ${chalk.bold(s.actionValue)}`);
+    console.log(chalk.dim('  Current patterns:'));
+    for (const rule of group) {
+      console.log(chalk.dim(`    • ${rule.matchValue}`));
+    }
+    console.log(`  Suggested:  ${chalk.yellow(s.suggestedMatchValue)}`);
+    console.log(chalk.dim('  ' + s.reason));
+
+    const action = await select({
+      message: 'Consolidate?',
+      choices: [
+        { name: `Accept: "${s.suggestedMatchValue}"`, value: 'accept' },
+        { name: 'Edit pattern', value: 'edit' },
+        { name: 'Skip', value: 'skip' },
+      ],
+    });
+
+    if (action === 'skip') continue;
+
+    let matchValue = s.suggestedMatchValue;
+    if (action === 'edit') {
+      matchValue = (await input({ message: 'Match pattern (contains):', default: matchValue })).trim();
+    }
+
+    // Remove the old per-variant rules
+    for (const rule of group) {
+      vetted.remove(rule.key);
+    }
+
+    // Save one consolidated rule (reuse the first rule's metadata as a template)
+    const template = group[0];
+    const newKey = `pre:imported_payee:contains:${matchValue}:payee:${template.actionValue}`;
+    vetted.approve({
+      key: newKey,
+      stage: 'pre',
+      matchField: 'imported_payee',
+      matchOp: 'contains',
+      matchValue,
+      actionField: 'payee',
+      actionValue: template.actionValue,
+      vettedAt: new Date().toISOString(),
+    });
+
+    console.log(chalk.green(`  ✓ Consolidated ${group.length} rules → "${matchValue}" → "${template.actionValue}"`));
+  }
 }
 
 // ── Main end-of-session flow ──────────────────────────────────────────────────
@@ -329,7 +450,12 @@ export async function runEndOfSession(
   accountMapping: Map<string, string>,
   actual: ActualClient,
   skipTransferDetection = false,
+  dryRun = false,
+  llm?: LLMAdapter,
 ): Promise<void> {
+  if (dryRun) {
+    console.log(chalk.bold.yellow('\n[DRY RUN — no changes will be made to Actual Budget]'));
+  }
   console.log('\n' + chalk.bold('── End of Session ───────────────────────────'));
 
   // ── Review / fix decisions ─────────────────────────────────────────────────
@@ -337,6 +463,29 @@ export async function runEndOfSession(
     console.log(chalk.bold('\n── Review Decisions ──────────────────────────'));
     const categories = await actual.getCategories();
     await editSessionDecisions(vetted, payeeMap, categories.map(c => c.name));
+  }
+
+  // ── Rule consolidation ─────────────────────────────────────────────────────
+  // Check across all vetted pre-rules for payees with multiple match patterns.
+  // (We only offer this when there are actually candidates, to avoid noise.)
+  if (llm) {
+    const allPreRulesForCheck = vetted.getAllRules().filter(r => r.stage === 'pre');
+    const actionCounts = new Map<string, number>();
+    for (const r of allPreRulesForCheck) {
+      actionCounts.set(r.actionValue.toLowerCase(), (actionCounts.get(r.actionValue.toLowerCase()) ?? 0) + 1);
+    }
+    const candidateCount = [...actionCounts.values()].filter(n => n > 1).length;
+
+    if (candidateCount > 0) {
+      console.log(chalk.bold('\n── Rule Consolidation ────────────────────────'));
+      const runConsolidate = await confirm({
+        message: `${candidateCount} payee(s) have multiple match patterns. Run AI consolidation?`,
+        default: true,
+      });
+      if (runConsolidate) {
+        await consolidateVettedRules(vetted, llm);
+      }
+    }
   }
 
   // Re-read after potential edits
@@ -383,10 +532,10 @@ export async function runEndOfSession(
         default: true,
       });
       if (doCreate) {
-        await createRulesInActual(allRules, tagLookup, actual);
+        await createRulesInActual(allRules, tagLookup, actual, dryRun);
       }
     } else if (rulesAction === 'create') {
-      await createRulesInActual(allRules, tagLookup, actual);
+      await createRulesInActual(allRules, tagLookup, actual, dryRun);
     }
   } else {
     console.log('No vetted rules yet.');
@@ -402,18 +551,20 @@ export async function runEndOfSession(
   });
 
   if (doImport) {
-    await importTransactions(transactions, payeeMap, tagLookup, categoryLookup, accountMapping, actual);
+    await importTransactions(transactions, payeeMap, tagLookup, categoryLookup, accountMapping, actual, dryRun);
 
-    // Flush the import payload before transfer detection so each sync POST stays small.
-    await actual.sync();
+    if (!dryRun) {
+      // Flush the import payload before transfer detection so each sync POST stays small.
+      await actual.sync();
 
-    // Transfer detection — scan ALL accounts in Actual Budget, not just
-    // the ones imported this session, so transfers can be detected across runs.
-    if (!skipTransferDetection) {
-      const allAccounts = await actual.getAccounts() as Array<{ id: string; name: string }>;
-      if (allAccounts.length > 1) {
-        console.log('\n' + chalk.bold('── Transfer Detection ───────────────────────'));
-        await detectAndLinkTransfers(allAccounts.map(a => a.id), actual);
+      // Transfer detection — scan ALL accounts in Actual Budget, not just
+      // the ones imported this session, so transfers can be detected across runs.
+      if (!skipTransferDetection) {
+        const allAccounts = await actual.getAccounts() as Array<{ id: string; name: string }>;
+        if (allAccounts.length > 1) {
+          console.log('\n' + chalk.bold('── Transfer Detection ───────────────────────'));
+          await detectAndLinkTransfers(allAccounts.map(a => a.id), actual);
+        }
       }
     }
   }
