@@ -2,8 +2,8 @@ import OpenAI from 'openai';
 import type { LLMAdapter, GroupForReview, Suggestion, ConsolidationGroup, ConsolidationSuggestion } from '../types.js';
 import { buildProposePayeePrompt, buildProposeCategoryPrompt, buildReviewGroupingsPrompt, buildSuggestConsolidationPrompt } from './prompts.js';
 
-const DEFAULT_FAST_MODEL   = 'gpt-4o-mini';
-const DEFAULT_REVIEW_MODEL = 'gpt-4o';
+export const DEFAULT_FAST_MODEL   = 'gpt-4o-mini';
+export const DEFAULT_REVIEW_MODEL = 'gpt-4o';
 
 export class OpenAIAdapter implements LLMAdapter {
   private client: OpenAI;
@@ -125,6 +125,10 @@ export class OpenAIAdapter implements LLMAdapter {
       tool_choice: { type: 'function', function: { name: 'report_consolidations' } },
       messages: [{ role: 'user', content: buildSuggestConsolidationPrompt(groupText) }],
     });
+
+    if (response.choices[0].finish_reason === 'length') {
+      console.warn('⚠  AI consolidation hit the token limit — results may be incomplete. Try running with fewer transactions.');
+    }
 
     const toolCall = response.choices[0].message.tool_calls?.[0];
     if (!toolCall || toolCall.type !== 'function') return [];

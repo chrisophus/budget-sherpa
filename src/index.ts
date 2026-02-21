@@ -5,8 +5,8 @@ import chalk from 'chalk';
 
 import { parseQfxFiles, parseQfxMeta } from './parsers/qfx.js';
 import { ActualClient } from './actual/client.js';
-import { AnthropicAdapter } from './llm/anthropic.js';
-import { OpenAIAdapter } from './llm/openai.js';
+import { AnthropicAdapter, DEFAULT_FAST_MODEL as ANTHROPIC_DEFAULT_FAST, DEFAULT_REVIEW_MODEL as ANTHROPIC_DEFAULT_REVIEW } from './llm/anthropic.js';
+import { OpenAIAdapter, DEFAULT_FAST_MODEL as OPENAI_DEFAULT_FAST, DEFAULT_REVIEW_MODEL as OPENAI_DEFAULT_REVIEW } from './llm/openai.js';
 import { VettedRuleStore } from './rules/vetted.js';
 import { classifyByRuleCoverage } from './rules/engine.js';
 import { runEndOfSession } from './ui/session.js';
@@ -118,6 +118,16 @@ async function main(): Promise<void> {
         fastModel:   config.anthropicFastModel,
         reviewModel: config.anthropicReviewModel,
       });
+
+  {
+    const fast   = config.llmProvider === 'openai'
+      ? (config.openaiModel       ?? OPENAI_DEFAULT_FAST)
+      : (config.anthropicFastModel   ?? ANTHROPIC_DEFAULT_FAST);
+    const review = config.llmProvider === 'openai'
+      ? (config.openaiReviewModel ?? OPENAI_DEFAULT_REVIEW)
+      : (config.anthropicReviewModel ?? ANTHROPIC_DEFAULT_REVIEW);
+    console.log(chalk.dim(`LLM: ${config.llmProvider}  (fast: ${fast}, review: ${review})\n`));
+  }
   const vetted = new VettedRuleStore(config.vettedRulesPath);
 
   // Build lookup maps
