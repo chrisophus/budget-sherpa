@@ -2,8 +2,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { LLMAdapter, GroupForReview, Suggestion, ConsolidationGroup, ConsolidationSuggestion } from '../types.js';
 import { buildProposePayeePrompt, buildProposeCategoryPrompt, buildReviewGroupingsPrompt, buildSuggestConsolidationPrompt } from './prompts.js';
 
-const DEFAULT_FAST_MODEL   = 'claude-haiku-4-5-20251001';
-const DEFAULT_REVIEW_MODEL = 'claude-sonnet-4-6';
+export const DEFAULT_FAST_MODEL   = 'claude-haiku-4-5-20251001';
+export const DEFAULT_REVIEW_MODEL = 'claude-sonnet-4-6';
 
 export class AnthropicAdapter implements LLMAdapter {
   private client: Anthropic;
@@ -23,7 +23,8 @@ export class AnthropicAdapter implements LLMAdapter {
       messages: [{ role: 'user', content: buildProposePayeePrompt(rawPayee, knownPayees) }],
     });
 
-    return (msg.content[0] as { text: string }).text.trim();
+    const block = msg.content.find(b => b.type === 'text');
+    return block ? (block as { text: string }).text.trim() : rawPayee;
   }
 
   async proposeCategory(cleanPayee: string, categories: string[]): Promise<string> {
@@ -33,7 +34,8 @@ export class AnthropicAdapter implements LLMAdapter {
       messages: [{ role: 'user', content: buildProposeCategoryPrompt(cleanPayee, categories) }],
     });
 
-    return (msg.content[0] as { text: string }).text.trim();
+    const block = msg.content.find(b => b.type === 'text');
+    return block ? (block as { text: string }).text.trim() : (categories[0] ?? '');
   }
 
   async reviewGroupings(groups: GroupForReview[]): Promise<Suggestion[]> {
@@ -119,6 +121,10 @@ export class AnthropicAdapter implements LLMAdapter {
       tool_choice: { type: 'tool' as const, name: 'report_consolidations' },
       messages: [{ role: 'user', content: buildSuggestConsolidationPrompt(groupText) }],
     });
+
+    if (msg.stop_reason === 'max_tokens') {
+      console.warn('⚠  AI consolidation hit the token limit — results may be incomplete. Try running with fewer transactions.');
+    }
 
     const toolUse = msg.content.find(b => b.type === 'tool_use');
     if (!toolUse || toolUse.type !== 'tool_use') return [];
