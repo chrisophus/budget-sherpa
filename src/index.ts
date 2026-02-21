@@ -62,6 +62,7 @@ if (config.actualCaCert) {
 // Find QFX files — use --dir argument or current directory
 const dirArg = process.argv.find(a => a.startsWith('--dir='))?.slice(6)
   ?? process.argv[process.argv.indexOf('--dir') + 1];
+const skipTransfers = process.argv.includes('--skip-transfers');
 const qfxDir = resolve(dirArg ?? '.');
 
 const qfxFiles = readdirSync(qfxDir)
@@ -165,7 +166,7 @@ try {
   } else {
     // ── End-of-session: review rules + import ───────────────────────────────
     const tagLookup = (cleanPayee: string) => vetted.getTag(cleanPayee);
-    await runEndOfSession(vetted, transactions, payeeMap, tagLookup, accountMapping, actual);
+    await runEndOfSession(vetted, transactions, payeeMap, tagLookup, accountMapping, actual, skipTransfers);
   }
 
 } catch (err: any) {
