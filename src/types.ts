@@ -1,3 +1,13 @@
+// --- Actual Budget category groups ---
+
+export interface CategoryGroup {
+  id: string;
+  name: string;
+  hidden: boolean;
+  is_income: boolean;
+  categories: Array<{ id: string; name: string; group_id: string; hidden: boolean }>;
+}
+
 // --- QFX file metadata ---
 
 export interface QfxFileMeta {
@@ -12,7 +22,7 @@ export interface QfxFileMeta {
 export interface RawTransaction {
   id: string;        // FITID - unique transaction ID from bank
   date: string;      // YYYYMMDD
-  amount: number;    // positive = credit, negative = debit
+  amount: number;    // dollars (float), positive = credit, negative = debit; convert to cents (* 100) for Actual
   rawPayee: string;  // NAME field from QFX
   account: string;   // ACCTID
 }

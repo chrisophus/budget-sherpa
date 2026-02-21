@@ -1,8 +1,8 @@
-import { select, input } from '@inquirer/prompts';
+import { select, input, Separator } from '@inquirer/prompts';
 import chalk from 'chalk';
-import type { Rule, RawTransaction, VettedRule, LLMAdapter, Suggestion } from '../types.js';
+import type { Rule, RawTransaction, VettedRule, LLMAdapter, Suggestion, CategoryGroup } from '../types.js';
 import type { VettedRuleStore } from '../rules/vetted.js';
-import { findPreRule, ruleKey } from '../rules/engine.js';
+import { findPreRule, ruleKey, flatCategoryNames } from '../rules/engine.js';
 import { extractMatchValue } from '../rules/normalize.js';
 import { TAG_CHOICES } from './constants.js';
 
@@ -17,6 +17,21 @@ export async function withConcurrency<T>(items: T[], concurrency: number, fn: (i
 }
 
 const LLM_CONCURRENCY = 5;
+
+// Build an @inquirer/prompts choice list with group separators for category picking.
+export function buildCategoryChoices(
+  categoryGroups: CategoryGroup[],
+): Array<{ name: string; value: string } | Separator> {
+  const choices: Array<{ name: string; value: string } | Separator> = [];
+  for (const group of categoryGroups) {
+    if (group.hidden) continue;
+    choices.push(new Separator(`── ${group.name} ──`));
+    for (const cat of group.categories) {
+      if (!cat.hidden) choices.push({ name: cat.name, value: cat.name });
+    }
+  }
+  return choices;
+}
 
 export interface PayeeRow {
   rawPayees: string[];      // raw payees covered by this match pattern
@@ -217,9 +232,10 @@ export async function browseAndVet(
   vetted: VettedRuleStore,
   llm: LLMAdapter,
   knownPayeeNames: string[],
-  categoryNames: string[],
+  categoryGroups: CategoryGroup[],
   payeeById: Map<string, string>,
 ): Promise<{ payeeMap: Map<string, string>; quit: boolean }> {
+  const categoryNames = flatCategoryNames(categoryGroups);
 
   // ── Phase 1: compute clean-name proposals in parallel ───────────────────────
 
@@ -442,7 +458,7 @@ export async function browseAndVet(
     if (catAction === 'choose') {
       row.category = await select({
         message: 'Select category:',
-        choices: categoryNames.map(c => ({ name: c, value: c })),
+        choices: buildCategoryChoices(categoryGroups),
       });
     } else if (catAction === 'skip') {
       row.category = null;
@@ -464,4 +480,85 @@ export async function browseAndVet(
   const payeeMap = saveDecisions(rows, vetted, knownPayeeNames);
 
   return { payeeMap, quit };
+}
+
+// ── Category gap filling ─────────────────────────────────────────────────────
+// For payees that already have a pre-stage rule in Actual but no category rule.
+// Only a category rule is saved to the vetted store (no duplicate pre-rule created).
+
+export async function vetCategoryGaps(
+  rawPayees: string[],
+  byRawPayee: Map<string, RawTransaction[]>,
+  rules: Rule[],
+  vetted: VettedRuleStore,
+  llm: LLMAdapter,
+  categoryGroups: CategoryGroup[],
+  payeeById: Map<string, string>,
+): Promise<void> {
+  const categoryNames = flatCategoryNames(categoryGroups);
+  const catChoices = buildCategoryChoices(categoryGroups);
+
+  console.log(chalk.bold(`\n── Category Gaps: ${rawPayees.length} payee(s) ──────────────────`));
+  console.log(chalk.dim('  These payees have payee rules in Actual but no category rule.\n'));
+
+  // Pre-fetch LLM proposals concurrently
+  const proposals = new Map<string, string>();
+  await withConcurrency(rawPayees, LLM_CONCURRENCY, async rawPayee => {
+    const txs = byRawPayee.get(rawPayee)!;
+    const preRule = rules.filter(r => r.stage === 'pre').find(r => {
+      const c = r.conditions[0];
+      return c && rawPayee.toLowerCase().includes(c.value.toLowerCase());
+    });
+    const payeeId = preRule?.actions.find(a => a.field === 'payee')?.value;
+    const cleanPayee = payeeId ? (payeeById.get(payeeId) ?? payeeId) : rawPayee;
+    const proposed = await llm.proposeCategory(cleanPayee, categoryNames);
+    proposals.set(rawPayee, proposed);
+  });
+
+  for (const rawPayee of rawPayees) {
+    const txs = byRawPayee.get(rawPayee)!;
+    const preRule = rules.filter(r => r.stage === 'pre').find(r => {
+      const c = r.conditions[0];
+      return c && rawPayee.toLowerCase().includes(c.value.toLowerCase());
+    });
+    const payeeId = preRule?.actions.find(a => a.field === 'payee')?.value;
+    const cleanPayee = payeeId ? (payeeById.get(payeeId) ?? payeeId) : rawPayee;
+
+    // Skip if vetted store already has a category rule for this payee
+    if (vetted.findCategoryRule(cleanPayee)) continue;
+
+    const proposed = proposals.get(rawPayee) ?? '';
+
+    console.log(chalk.bold(`\n── ${cleanPayee} ────────────────────────────────`));
+    console.log(chalk.dim(`  Raw: ${rawPayee}  (${txs.length} transaction(s))`));
+    console.log(chalk.dim('  Proposed: ') + chalk.magenta(proposed));
+
+    const action = await select({
+      message: 'Category?',
+      choices: [
+        { name: `Accept "${proposed}"`, value: 'accept' },
+        { name: 'Choose from list', value: 'choose' },
+        { name: 'Skip (no category rule)', value: 'skip' },
+      ],
+    });
+
+    if (action === 'skip') continue;
+
+    let category = proposed;
+    if (action === 'choose') {
+      category = await select({ message: 'Select category:', choices: catChoices });
+    }
+
+    vetted.approve({
+      key: `null:payee:is:${cleanPayee}:category:${category}`,
+      stage: null,
+      matchField: 'payee',
+      matchOp: 'is',
+      matchValue: cleanPayee,
+      actionField: 'category',
+      actionValue: category,
+      vettedAt: new Date().toISOString(),
+    });
+    console.log(chalk.green(`✓ ${cleanPayee} → ${category}`));
+  }
 }

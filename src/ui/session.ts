@@ -270,56 +270,59 @@ export async function createRulesInActual(
 
 // ── Transaction import ────────────────────────────────────────────────────────
 
-// Exported for testing
-export function buildTxPayload(
-  tx: RawTransaction,
-  payeeMap: Map<string, string>,
-  tagLookup: (cleanPayee: string) => string | null,
-  categoryLookup: (cleanPayee: string) => string | null,
-  categoryIdByName: Map<string, string>,
-): Record<string, unknown> {
-  const cleanPayee = payeeMap.get(tx.rawPayee);
-  const tag = cleanPayee ? tagLookup(cleanPayee) : null;
-  const categoryName = cleanPayee ? categoryLookup(cleanPayee) : null;
-  const categoryId = categoryName ? categoryIdByName.get(categoryName.toLowerCase()) : null;
-
+// Exported for testing. Produces a minimal import payload — just factual data.
+// Actual Budget's rules (created by budget-sherpa) handle payee cleaning,
+// category assignment, and tag notes automatically during import.
+export function buildTxPayload(tx: RawTransaction): Record<string, unknown> {
   // Convert YYYYMMDD → YYYY-MM-DD
   const date = `${tx.date.slice(0, 4)}-${tx.date.slice(4, 6)}-${tx.date.slice(6, 8)}`;
-  // Convert to cents (Actual Budget importTransactions unit)
+  // Convert dollars (float) to cents (integer) for Actual Budget
   const amount = Math.round(tx.amount * 100);
-
-  return {
-    date,
-    amount,
-    imported_id: tx.id,
-    imported_payee: tx.rawPayee,
-    ...(cleanPayee ? { payee_name: cleanPayee } : {}),
-    ...(categoryId ? { category: categoryId } : {}),
-    ...(tag ? { notes: `#${tag}` } : {}),
-  };
+  return { date, amount, imported_id: tx.id, imported_payee: tx.rawPayee };
 }
 
+// Run a dry-run import against each account to show duplicate/new counts.
+// Useful for validating readiness before the user imports through Actual's UI.
+async function runDryRunValidation(
+  transactions: RawTransaction[],
+  accountMapping: Map<string, string>,
+  actual: ActualClient,
+): Promise<void> {
+  console.log(chalk.bold('\n── Dry-Run Import Validation ────────────────'));
+  for (const [qfxAcctId, actualAcctId] of accountMapping) {
+    const payload = transactions
+      .filter(t => t.account === qfxAcctId)
+      .map(buildTxPayload);
+    if (payload.length === 0) continue;
+    try {
+      const result = await actual.importTransactions(actualAcctId, payload, { dryRun: true });
+      const newCount = result.added?.length ?? 0;
+      const dupCount = result.updated?.length ?? 0;
+      console.log(
+        `  account …${qfxAcctId.slice(-4)}: ` +
+        chalk.green(`${newCount} new`) +
+        (dupCount > 0 ? chalk.dim(`, ${dupCount} already in Actual`) : ''),
+      );
+    } catch (err: any) {
+      console.log(chalk.red(`  ✗ account ${qfxAcctId}: ${err.message ?? err}`));
+    }
+  }
+}
+
+// Import transactions using bare payloads — Actual's rules do the transformation.
 async function importTransactions(
   transactions: RawTransaction[],
-  payeeMap: Map<string, string>,
-  tagLookup: (cleanPayee: string) => string | null,
-  categoryLookup: (cleanPayee: string) => string | null,
   accountMapping: Map<string, string>,
   actual: ActualClient,
   dryRun = false,
 ): Promise<void> {
-  const categories = await actual.getCategories();
-  const categoryIdByName = new Map(categories.map(c => [c.name.toLowerCase(), c.id]));
-
   let totalAdded = 0;
   let totalUpdated = 0;
 
   for (const [qfxAcctId, actualAcctId] of accountMapping) {
-    const acctTxs = transactions.filter(t => t.account === qfxAcctId);
-
-    const payload = acctTxs.map(tx =>
-      buildTxPayload(tx, payeeMap, tagLookup, categoryLookup, categoryIdByName)
-    );
+    const payload = transactions
+      .filter(t => t.account === qfxAcctId)
+      .map(buildTxPayload);
 
     if (dryRun) {
       console.log(chalk.dim(`  [dry-run] would import ${payload.length} transactions → account …${qfxAcctId.slice(-4)}`));
@@ -451,6 +454,7 @@ export async function runEndOfSession(
   actual: ActualClient,
   skipTransferDetection = false,
   dryRun = false,
+  importMode = false,
   llm?: LLMAdapter,
 ): Promise<void> {
   if (dryRun) {
@@ -466,8 +470,6 @@ export async function runEndOfSession(
   }
 
   // ── Rule consolidation ─────────────────────────────────────────────────────
-  // Check across all vetted pre-rules for payees with multiple match patterns.
-  // (We only offer this when there are actually candidates, to avoid noise.)
   if (llm) {
     const allPreRulesForCheck = vetted.getAllRules().filter(r => r.stage === 'pre');
     const actionCounts = new Map<string, number>();
@@ -492,11 +494,9 @@ export async function runEndOfSession(
   const sessionRules = vetted.getSessionRules();
   const allRules = vetted.getAllRules();
 
-  // ── New rules ──────────────────────────────────────────────────────────────
+  // ── Create rules ───────────────────────────────────────────────────────────
   const allPreRules = allRules.filter(r => r.stage === 'pre');
   const allCatRules = allRules.filter(r => r.stage === null);
-  const sessionPreRules = sessionRules.filter(r => r.stage === 'pre');
-  const sessionCatRules = sessionRules.filter(r => r.stage === null);
 
   const newSuffix = sessionRules.length > 0
     ? chalk.dim(` (${sessionRules.length} new this session)`)
@@ -541,31 +541,44 @@ export async function runEndOfSession(
     console.log('No vetted rules yet.');
   }
 
-  // ── Import transactions ────────────────────────────────────────────────────
-  const categoryLookup = (cleanPayee: string) => vetted.findCategoryRule(cleanPayee)?.actionValue ?? null;
+  // ── Dry-run import validation (always available, not just in --import mode) ─
+  // Lets the user preview what the import would look like before doing it
+  // through Actual's UI or via --import, without committing any transactions.
+  if (!dryRun && accountMapping.size > 0) {
+    const runValidation = await confirm({
+      message: `Run dry-run import to preview new vs. duplicate transaction counts?`,
+      default: false,
+    });
+    if (runValidation) {
+      await runDryRunValidation(transactions, accountMapping, actual);
+    }
+  }
 
-  const mappedTxCount = transactions.filter(t => payeeMap.has(t.rawPayee)).length;
-  const doImport = await confirm({
-    message: `Import ${transactions.length} transactions (${mappedTxCount} with mapped payees)?`,
-    default: true,
-  });
+  // ── Transaction import (--import mode only) ────────────────────────────────
+  if (importMode) {
+    const doImport = await confirm({
+      message: `Import ${transactions.length} transactions into Actual Budget?`,
+      default: true,
+    });
 
-  if (doImport) {
-    await importTransactions(transactions, payeeMap, tagLookup, categoryLookup, accountMapping, actual, dryRun);
+    if (doImport) {
+      await importTransactions(transactions, accountMapping, actual, dryRun);
 
-    if (!dryRun) {
-      // Flush the import payload before transfer detection so each sync POST stays small.
-      await actual.sync();
+      if (!dryRun) {
+        // Flush before transfer detection so each sync POST stays small.
+        await actual.sync();
 
-      // Transfer detection — scan ALL accounts in Actual Budget, not just
-      // the ones imported this session, so transfers can be detected across runs.
-      if (!skipTransferDetection) {
-        const allAccounts = await actual.getAccounts() as Array<{ id: string; name: string }>;
-        if (allAccounts.length > 1) {
-          console.log('\n' + chalk.bold('── Transfer Detection ───────────────────────'));
-          await detectAndLinkTransfers(allAccounts.map(a => a.id), actual);
+        if (!skipTransferDetection) {
+          const allAccounts = await actual.getAccounts() as Array<{ id: string; name: string }>;
+          if (allAccounts.length > 1) {
+            console.log('\n' + chalk.bold('── Transfer Detection ───────────────────────'));
+            await detectAndLinkTransfers(allAccounts.map(a => a.id), actual);
+          }
         }
       }
     }
+  } else {
+    console.log(chalk.dim('\nTip: run with --import to import transactions directly from budget-sherpa.'));
+    console.log(chalk.dim('     Otherwise, import through Actual\'s UI — your rules will handle the rest.'));
   }
 }

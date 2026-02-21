@@ -52,6 +52,10 @@ export class ActualClient {
     return api.getCategories() as any;
   }
 
+  async getCategoryGroups(): Promise<Array<{ id: string; name: string; hidden: boolean; is_income: boolean; categories: Array<{ id: string; name: string; group_id: string; hidden: boolean }> }>> {
+    return api.getCategoryGroups() as any;
+  }
+
   async createRule(rule: Omit<Rule, 'id'>): Promise<string> {
     return api.createRule(rule as any) as any;
   }
@@ -72,8 +76,8 @@ export class ActualClient {
     return api.createAccount(account as any, initialBalance) as any;
   }
 
-  async importTransactions(accountId: string, transactions: any[]): Promise<{ added: string[]; updated: string[]; errors: any[] }> {
-    return api.importTransactions(accountId, transactions) as any;
+  async importTransactions(accountId: string, transactions: any[], opts?: { dryRun?: boolean }): Promise<{ added: string[]; updated: string[]; errors: any[] }> {
+    return api.importTransactions(accountId, transactions, opts) as any;
   }
 
   async getTransactions(accountId: string, startDate = '2000-01-01', endDate = '2099-12-31'): Promise<any[]> {

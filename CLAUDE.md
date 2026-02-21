@@ -32,7 +32,8 @@ npm run test:watch
 **CLI flags supported by the tool:**
 - `--dir <path>` — directory containing `.qfx` / `.QFX` files (required)
 - `--dry-run` — parse and vet transactions but skip all writes to Actual Budget
-- `--skip-transfers` — skip the transfer-detection step at end of session
+- `--import` — also import transactions after rule creation (bare payload; rules do the transformation)
+- `--skip-transfers` — skip transfer-detection when used with `--import`
 
 ---
 
@@ -132,20 +133,32 @@ VETTED_RULES_PATH=./vetted-rules.json
 
 ## Core Concepts & Architecture
 
+### Primary Goal
+
+Budget Sherpa is a **rule management tool**. Its job is to ensure that when you import QFX files into Actual Budget's UI (or via `--import`), the rules already exist to clean payees and assign categories automatically. Transaction import is a secondary, optional step.
+
 ### Data Flow
 
 ```
 QFX files
   → parse (qfx.ts)
-  → group transactions by normalized payee
-  → for each payee group: LLM proposes clean name + category (concurrent, max 5)
-  → browseAndVet() — human reviews/edits each group interactively
-  → AI review pass — batch suggestions for consolidating similar payees
+  → group transactions by raw payee
+  → classifyByRuleCoverage() — compare against existing Actual rules:
+      • covered:       pre-rule + category rule exist → skip
+      • needsCategory: pre-rule exists, no category → opt-in gap fill
+      • uncovered:     no rules at all → full vetting
+  → browseAndVet() with only uncovered payees:
+      LLM proposes clean name + category (concurrent, max 5)
+      human reviews/edits each group interactively
+      AI review pass — batch suggestions for consolidating similar payees
+  → optional: vetCategoryGaps() — assign categories to needsCategory payees
   → end-of-session (runEndOfSession):
-      1. Review and approve rule candidates
-      2. Create approved rules + payees in Actual Budget
-      3. Import transactions
-      4. Detect transfer pairs and link them
+      1. Edit/review session decisions
+      2. Rule consolidation (opt-in AI pass)
+      3. Create approved rules in Actual Budget
+      4. Optional: dry-run import preview (shows new vs duplicate counts)
+      5. [--import only] Import transactions (bare payload — rules do the work)
+      6. [--import only] Detect and link transfer pairs
 ```
 
 ### 3-Stage Vetting Workflow (`src/ui/vetting.ts`)
@@ -168,6 +181,15 @@ Rules are persisted by a stable content hash (not Actual Budget's internal ID):
 - `pre` rules match raw payee; `null` rules match cleaned payee
 - This key survives rule ID changes across Actual Budget syncs
 
+### Rule Coverage Analysis (`src/rules/engine.ts`)
+
+`classifyByRuleCoverage(rules, uniqueRawPayees, payeeById)` classifies each unique raw payee into:
+- **`covered`** — Actual has both a pre-stage rule (raw→payee) and a null-stage category rule
+- **`needsCategory`** — pre-stage rule exists but no category rule (opt-in fill)
+- **`uncovered`** — no pre-stage rule matches at all (shown in main browser)
+
+Category rule detection handles both ID-based conditions (`type: 'id'`, budget-sherpa style) and string-based conditions (`type: 'string'`, manually created in Actual UI).
+
 ### VettedRuleStore (`src/rules/vetted.ts`)
 
 Persists approved rules between sessions in a JSON file:
@@ -181,6 +203,8 @@ Persists approved rules between sessions in a JSON file:
 ```
 
 Previously vetted payees are auto-skipped on subsequent runs.
+
+`cleanCoveredByActual(actualRules, payeeById)` removes vetted store entries that are now fully represented in Actual's rule set (called at startup). This prevents the store from growing stale after rules are successfully created.
 
 ### LLM Adapter Interface (`src/types.ts`)
 
@@ -320,10 +344,12 @@ Currently only QFX/OFX is supported. To add a new format (e.g., CSV):
 ## Common Pitfalls
 
 - **Import extensions**: Always use `.js` in import paths (even when importing `.ts` files) due to `NodeNext` module resolution.
-- **Amount units**: Transaction amounts are in **cents** (integer), not dollars. Be careful with arithmetic.
+- **Amount units**: `RawTransaction.amount` is in **dollars** (float, as parsed from QFX `<TRNAMT>`). It is multiplied by 100 in `buildTxPayload` before being sent to Actual Budget, which expects integer cents.
+- **Bare import payload**: `buildTxPayload` intentionally omits `payee_name`, `category`, and `notes`. These fields are set by Actual's rules during import — do not re-add them to the payload.
 - **Actual Budget API verbosity**: The `@actual-app/api` package logs heavily to stdout during sync. The codebase suppresses this by temporarily overriding `console.log`; preserve this behavior.
 - **Rule keys are content-addressed**: Do not use Actual Budget's internal rule IDs for persistence — always use the computed content hash key.
-- **Vetted store auto-skip**: Payees already in `vetted-rules.json` are skipped silently on re-run. If a payee isn't appearing, check the vetted store.
+- **Vetted store auto-skip**: On each startup, `cleanCoveredByActual` removes entries already in Actual. Remaining entries (pending rule creation) are auto-skipped during vetting. If a payee isn't appearing, check both Actual's rules and `vetted-rules.json`.
+- **`getCategoryGroups` not `getCategories`**: The browser uses `getCategoryGroups()` for the grouped picker. `getCategories()` is still used in `session.ts` for name→ID resolution during rule creation.
 
 ---
 
