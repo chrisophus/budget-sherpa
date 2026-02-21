@@ -8,10 +8,11 @@ import { ActualClient } from './actual/client.js';
 import { AnthropicAdapter } from './llm/anthropic.js';
 import { OpenAIAdapter } from './llm/openai.js';
 import { VettedRuleStore } from './rules/vetted.js';
+import { classifyByRuleCoverage } from './rules/engine.js';
 import { runEndOfSession } from './ui/session.js';
-import { browseAndVet } from './ui/browse.js';
+import { browseAndVet, vetCategoryGaps } from './ui/browse.js';
 import { parseCliArgs } from './cli/args.js';
-import { input, select } from '@inquirer/prompts';
+import { input, select, confirm } from '@inquirer/prompts';
 import type { Config } from './types.js';
 
 // --- Config ---
@@ -88,6 +89,9 @@ async function main(): Promise<void> {
   if (config.dryRun) {
     console.log(chalk.bold.yellow('[DRY RUN — no changes will be made to Actual Budget]\n'));
   }
+  if (args.import) {
+    console.log(chalk.bold.blue('[IMPORT MODE — transactions will be imported after rule creation]\n'));
+  }
   console.log(`Found ${qfxFiles.length} QFX/OFX file(s)`);
 
   const qfxMeta = parseQfxMeta(qfxFiles);
@@ -98,10 +102,10 @@ async function main(): Promise<void> {
   const actual = new ActualClient();
   await actual.init(config.actualServerUrl, config.actualPassword, config.actualBudgetId);
 
-  const [rules, payees, categories, existingAccounts] = await Promise.all([
+  const [rules, payees, categoryGroups, existingAccounts] = await Promise.all([
     actual.getRules(),
     actual.getPayees(),
-    actual.getCategories(),
+    actual.getCategoryGroups(),
     actual.getAccounts(),
   ]);
 
@@ -116,16 +120,51 @@ async function main(): Promise<void> {
       });
   const vetted = new VettedRuleStore(config.vettedRulesPath);
 
-  // Wrap all interactive work in one try/catch so Ctrl+C anywhere
-  // (account mapping, vetting, end-of-session) shuts down cleanly.
+  // Build lookup maps
+  const knownPayeeNames = payees.map(p => p.name);
+  const payeeById = new Map(payees.map(p => [p.id, p.name]));
+
+  // Remove vetted store entries that are now fully represented in Actual's rules
+  vetted.cleanCoveredByActual(rules, payeeById);
+
+  // Group transactions by raw payee
+  const byRawPayee = new Map<string, typeof transactions>();
+  for (const tx of transactions) {
+    if (!byRawPayee.has(tx.rawPayee)) byRawPayee.set(tx.rawPayee, []);
+    byRawPayee.get(tx.rawPayee)!.push(tx);
+  }
+  const uniquePayees = [...byRawPayee.keys()];
+
+  // ── Rule coverage analysis ─────────────────────────────────────────────────
+  const coverage = classifyByRuleCoverage(rules, uniquePayees, payeeById);
+
+  console.log(chalk.bold('── Rule Coverage ────────────────────────────'));
+  if (coverage.covered.length > 0) {
+    console.log(chalk.dim(`  ${coverage.covered.length.toString().padStart(3)} payee(s)  fully covered (payee + category rules exist)`));
+  }
+  if (coverage.needsCategory.length > 0) {
+    console.log(chalk.yellow(`  ${coverage.needsCategory.length.toString().padStart(3)} payee(s)  have payee rule but no category rule`));
+  }
+  if (coverage.uncovered.length > 0) {
+    console.log(chalk.red(`  ${coverage.uncovered.length.toString().padStart(3)} payee(s)  have no rules at all`));
+  }
+
+  const gapCount = coverage.uncovered.length + coverage.needsCategory.length;
+  if (gapCount === 0) {
+    console.log(chalk.bold.green('\nAll payees are fully covered — no rule gaps found.'));
+  } else {
+    console.log(chalk.bold(`\nProceeding with ${coverage.uncovered.length} uncovered payee(s).`));
+  }
+
+  // Wrap all interactive work in one try/catch so Ctrl+C anywhere shuts down cleanly.
   try {
-    // ── Account detection / creation ──────────────────────────────────────────
+    // ── Account mapping ────────────────────────────────────────────────────────
 
     const accountMapping = new Map<string, string>(); // qfxAcctId → actualAccountId
 
     for (const meta of qfxMeta) {
       const filename = basename(meta.filepath);
-      console.log(chalk.bold(`── Account: …${meta.lastFour} (${meta.acctType}) ← ${filename} ──────────────────`));
+      console.log(chalk.bold(`\n── Account: …${meta.lastFour} (${meta.acctType}) ← ${filename} ──────────────────`));
 
       if (existingAccounts.length > 0) {
         const choices = [
@@ -155,42 +194,59 @@ async function main(): Promise<void> {
       console.log(chalk.green(`✓ Created account "${name}"`));
     }
 
-    // ── Browse & vet ─────────────────────────────────────────────────────────
+    // ── Browse & vet uncovered payees ─────────────────────────────────────────
 
-    const knownPayeeNames = payees.map(p => p.name);
-    const categoryNames = categories.map(c => c.name);
-    const payeeById = new Map(payees.map(p => [p.id, p.name]));
+    let payeeMap = new Map<string, string>();
 
-    // Group transactions by raw payee
-    const byRawPayee = new Map<string, typeof transactions>();
-    for (const tx of transactions) {
-      if (!byRawPayee.has(tx.rawPayee)) byRawPayee.set(tx.rawPayee, []);
-      byRawPayee.get(tx.rawPayee)!.push(tx);
+    if (coverage.uncovered.length > 0) {
+      const uncoveredByRawPayee = new Map(
+        coverage.uncovered.map(p => [p, byRawPayee.get(p)!]),
+      );
+      console.log(`\n${coverage.uncovered.length} payee(s) need rules\n`);
+
+      const result = await browseAndVet(
+        coverage.uncovered, uncoveredByRawPayee, rules, vetted, llm,
+        knownPayeeNames, categoryGroups, payeeById,
+      );
+      payeeMap = result.payeeMap;
+
+      if (result.quit) {
+        console.log(chalk.yellow('\nDecisions saved. Run again to create rules and finish.'));
+        await actual.shutdown();
+        return;
+      }
     }
 
-    const uniquePayees = [...byRawPayee.keys()];
-    console.log(`\n${uniquePayees.length} unique raw payees`);
+    // ── Category gap filling (opt-in) ─────────────────────────────────────────
 
-    const { payeeMap, quit } = await browseAndVet(
-      uniquePayees, byRawPayee, rules, vetted, llm,
-      knownPayeeNames, categoryNames, payeeById,
-    );
+    if (coverage.needsCategory.length > 0) {
+      console.log('');
+      const fillGaps = await confirm({
+        message: `${coverage.needsCategory.length} payee(s) have payee rules but no category rule. Assign categories now?`,
+        default: false,
+      });
+      if (fillGaps) {
+        const needsCatByRawPayee = new Map(
+          coverage.needsCategory.map(p => [p, byRawPayee.get(p)!]),
+        );
+        await vetCategoryGaps(
+          coverage.needsCategory, needsCatByRawPayee, rules, vetted, llm,
+          categoryGroups, payeeById,
+        );
+      }
+    }
 
     // ── Summary ───────────────────────────────────────────────────────────────
     console.log(chalk.bold('\n── Summary ───────────────────────────────────'));
     console.log(`Transactions:  ${transactions.length}`);
-    console.log(`Payees mapped: ${payeeMap.size} / ${uniquePayees.length}`);
+    console.log(`Rule gaps:     ${coverage.uncovered.length + coverage.needsCategory.length} payee(s) reviewed`);
 
-    if (quit) {
-      console.log(chalk.yellow('\nDecisions saved to vetted-rules.json. Run again to create rules and import.'));
-    } else {
-      // ── End-of-session: review rules + import ─────────────────────────────
-      const tagLookup = (cleanPayee: string) => vetted.getTag(cleanPayee);
-      await runEndOfSession(
-        vetted, transactions, payeeMap, tagLookup, accountMapping, actual,
-        args.skipTransfers, config.dryRun, llm,
-      );
-    }
+    // ── End-of-session: rules + optional import ───────────────────────────────
+    const tagLookup = (cleanPayee: string) => vetted.getTag(cleanPayee);
+    await runEndOfSession(
+      vetted, transactions, payeeMap, tagLookup, accountMapping, actual,
+      args.skipTransfers, config.dryRun, args.import, llm,
+    );
 
   } catch (err: any) {
     if (err?.name === 'ExitPromptError') {

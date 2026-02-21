@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import type { VettedStore, VettedRule } from '../types.js';
+import type { VettedStore, VettedRule, Rule } from '../types.js';
 
 export class VettedRuleStore {
   private store: VettedStore;
@@ -76,6 +76,62 @@ export class VettedRuleStore {
     delete this.store.rules[key];
     this.sessionKeys.delete(key);
     this.save();
+  }
+
+  // Remove vetted rules that are now fully represented in Actual's rule set.
+  // Called at startup after loading Actual rules so the store doesn't grow stale.
+  // payeeById maps payee ID → name (needed to resolve string-type category conditions).
+  cleanCoveredByActual(actualRules: Rule[], payeeById: Map<string, string>): void {
+    const nameToId = new Map(
+      [...payeeById.entries()].map(([id, name]) => [name.toLowerCase(), id]),
+    );
+    const preActualRules = actualRules.filter(r => r.stage === 'pre');
+    const nullActualRules = actualRules.filter(r => r.stage === null);
+    let changed = false;
+
+    for (const vr of this.getAllRules().filter(r => r.stage === 'pre')) {
+      const payeeId = nameToId.get(vr.actionValue.toLowerCase());
+      if (!payeeId) continue;
+
+      const isCoveredByActual = preActualRules.some(ar => {
+        const c = ar.conditions[0];
+        const a = ar.actions[0];
+        return c && a &&
+          c.op === vr.matchOp &&
+          c.field === vr.matchField &&
+          c.value.toLowerCase() === vr.matchValue.toLowerCase() &&
+          a.field === 'payee' &&
+          a.value === payeeId;
+      });
+      if (!isCoveredByActual) continue;
+
+      delete this.store.rules[vr.key];
+      this.sessionKeys.delete(vr.key);
+      changed = true;
+
+      // Clean the associated category rule if Actual also has it
+      const catRule = this.getAllRules().find(
+        r => r.stage === null && r.matchValue.toLowerCase() === vr.actionValue.toLowerCase(),
+      );
+      if (catRule) {
+        const catCovered = nullActualRules.some(ar => {
+          const c = ar.conditions[0];
+          return c && c.field === 'payee' &&
+            (c.value === payeeId || c.value.toLowerCase() === vr.actionValue.toLowerCase());
+        });
+        if (catCovered) {
+          delete this.store.rules[catRule.key];
+          this.sessionKeys.delete(catRule.key);
+        }
+      }
+
+      // Clean the tag entry
+      if (vr.actionValue in this.store.tags) {
+        delete this.store.tags[vr.actionValue];
+      }
+    }
+
+    if (changed) this.save();
   }
 
   private save(): void {

@@ -18,81 +18,56 @@ function makeTx(overrides: Partial<RawTransaction> = {}): RawTransaction {
   };
 }
 
-const noTag = () => null;
-const noCat = () => null;
-
+// buildTxPayload now produces a bare factual payload — Actual Budget's rules
+// (created by budget-sherpa) handle payee cleaning, category, and notes.
 describe('buildTxPayload', () => {
   it('converts amount from dollars to cents', () => {
-    const tx = makeTx({ amount: -199.00 });
-    const result = buildTxPayload(tx, new Map(), noTag, noCat, new Map());
+    const result = buildTxPayload(makeTx({ amount: -199.00 }));
     expect(result.amount).toBe(-19900);
   });
 
   it('converts positive amount correctly', () => {
-    const result = buildTxPayload(makeTx({ amount: 1234.56 }), new Map(), noTag, noCat, new Map());
+    const result = buildTxPayload(makeTx({ amount: 1234.56 }));
     expect(result.amount).toBe(123456);
   });
 
   it('rounds sub-cent amounts', () => {
     // Some banks emit amounts like -5.999 due to FX; should round to nearest cent
-    const result = buildTxPayload(makeTx({ amount: -5.999 }), new Map(), noTag, noCat, new Map());
+    const result = buildTxPayload(makeTx({ amount: -5.999 }));
     expect(result.amount).toBe(-600);
   });
 
   it('rounds -0.005 boundary to effectively zero', () => {
     // -0.005 * 100 rounds to 0 or -0 depending on floating point;
     // either way Math.abs of the result is 0.
-    const result = buildTxPayload(makeTx({ amount: -0.005 }), new Map(), noTag, noCat, new Map());
+    const result = buildTxPayload(makeTx({ amount: -0.005 }));
     expect(Math.abs(result.amount as number)).toBe(0);
   });
 
   it('converts date from YYYYMMDD to YYYY-MM-DD', () => {
-    const result = buildTxPayload(makeTx({ date: '20260315' }), new Map(), noTag, noCat, new Map());
+    const result = buildTxPayload(makeTx({ date: '20260315' }));
     expect(result.date).toBe('2026-03-15');
   });
 
-  it('sets payee_name when cleanPayee is found', () => {
-    const payeeMap = new Map([['AMAZON MKTPL 12345', 'Amazon']]);
-    const result = buildTxPayload(makeTx(), payeeMap, noTag, noCat, new Map());
-    expect(result.payee_name).toBe('Amazon');
+  it('always sets imported_id and imported_payee', () => {
+    const result = buildTxPayload(makeTx({ id: 'FIT123', rawPayee: 'WALMART' }));
+    expect(result.imported_id).toBe('FIT123');
+    expect(result.imported_payee).toBe('WALMART');
   });
 
-  it('omits payee_name when no mapping exists', () => {
-    const result = buildTxPayload(makeTx(), new Map(), noTag, noCat, new Map());
+  it('does not set payee_name — rules handle payee cleaning', () => {
+    const result = buildTxPayload(makeTx());
     expect(result).not.toHaveProperty('payee_name');
   });
 
-  it('sets category when lookup returns a known category', () => {
-    const payeeMap = new Map([['AMAZON MKTPL 12345', 'Amazon']]);
-    const categoryLookup = (p: string) => p === 'Amazon' ? 'Shopping' : null;
-    const categoryIdByName = new Map([['shopping', 'cat-123']]);
-    const result = buildTxPayload(makeTx(), payeeMap, noTag, categoryLookup, categoryIdByName);
-    expect(result.category).toBe('cat-123');
-  });
-
-  it('omits category when category name not found in Actual', () => {
-    const payeeMap = new Map([['AMAZON MKTPL 12345', 'Amazon']]);
-    const categoryLookup = () => 'Shopping';
-    const result = buildTxPayload(makeTx(), payeeMap, noTag, categoryLookup, new Map()); // empty id map
+  it('does not set category — rules handle category assignment', () => {
+    const result = buildTxPayload(makeTx());
     expect(result).not.toHaveProperty('category');
   });
 
-  it('sets notes tag when tagLookup returns a value', () => {
-    const payeeMap = new Map([['AMAZON MKTPL 12345', 'Amazon']]);
-    const tagLookup = (p: string) => p === 'Amazon' ? 'discretionary' : null;
-    const result = buildTxPayload(makeTx(), payeeMap, tagLookup, noCat, new Map());
-    expect(result.notes).toBe('#discretionary');
-  });
-
-  it('omits notes when no tag', () => {
-    const result = buildTxPayload(makeTx(), new Map(), noTag, noCat, new Map());
+  it('does not set notes — rules handle tag notes', () => {
+    const result = buildTxPayload(makeTx());
     expect(result).not.toHaveProperty('notes');
-  });
-
-  it('always sets imported_id and imported_payee', () => {
-    const result = buildTxPayload(makeTx({ id: 'FIT123', rawPayee: 'WALMART' }), new Map(), noTag, noCat, new Map());
-    expect(result.imported_id).toBe('FIT123');
-    expect(result.imported_payee).toBe('WALMART');
   });
 });
 
