@@ -2,9 +2,17 @@ import { select, input, Separator } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { Rule, RawTransaction, VettedRule, LLMAdapter, Suggestion, CategoryGroup } from '../types.js';
 import type { VettedRuleStore } from '../rules/vetted.js';
-import { findPreRule, ruleKey, flatCategoryNames } from '../rules/engine.js';
-import { extractMatchValue } from '../rules/normalize.js';
+import { flatCategoryNames } from '../rules/engine.js';
 import { TAG_CHOICES } from './constants.js';
+import {
+  type RawMeta,
+  type PayeeRow,
+  computeVettedMeta,
+  buildProposedMeta,
+  buildPayeeRows,
+  aggregateGroupsForReview,
+  applySuggestionMutation,
+} from '../core/browse.js';
 
 // Run fn over items with at most `concurrency` in-flight at once.
 export async function withConcurrency<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
@@ -33,19 +41,7 @@ export function buildCategoryChoices(
   return choices;
 }
 
-export interface PayeeRow {
-  rawPayees: string[];      // raw payees covered by this match pattern
-  txCount: number;
-  matchValue: string;       // match pattern used in the pre-rule
-  cleanPayee: string;       // current clean name decision
-  category: string | null;  // current category decision
-  tag: string | null;       // current tag (null = none)
-  tagDecided: boolean;      // user has explicitly decided tag
-  preRuleKey: string;       // key for the pre-rule
-  wasVetted: boolean;       // already in vetted store from a previous session
-  touched: boolean;         // user explicitly edited this row this session
-  skipped: boolean;         // user chose Skip
-}
+export type { RawMeta, PayeeRow } from '../core/browse.js';
 
 function rowLabel(row: PayeeRow): string {
   const match = row.matchValue.slice(0, 26).padEnd(26);
@@ -103,54 +99,20 @@ export async function applySuggestions(
 
     if (action !== 'accept') continue;
 
-    if (s.type === 'split' && s.rawPayees?.length && s.suggestedName) {
-      const toSplit = new Set(s.rawPayees.map(r => r.toLowerCase()));
-      const removed: string[] = [];
+    const result = applySuggestionMutation(s, rows, byRawPayee);
 
-      // Raw payees can live in any row sharing this clean name — search all of them
-      for (const row of matchingRows) {
-        const taken = row.rawPayees.filter(r => toSplit.has(r.toLowerCase()));
-        if (taken.length === 0) continue;
-        removed.push(...taken);
-        row.rawPayees = row.rawPayees.filter(r => !toSplit.has(r.toLowerCase()));
-        row.txCount = row.rawPayees.reduce((n, r) => n + (byRawPayee.get(r)?.length ?? 0), 0);
-        row.touched = true;
-      }
-
-      if (removed.length === 0) { console.log(chalk.yellow('  ⚠ None of the listed raw payees found — skipped')); continue; }
-
-      const newMatchValue = extractMatchValue(removed[0]);
-      rows.push({
-        rawPayees: removed,
-        txCount: removed.reduce((n, r) => n + (byRawPayee.get(r)?.length ?? 0), 0),
-        matchValue: newMatchValue,
-        cleanPayee: s.suggestedName,
-        category: s.suggestedCategory ?? null,
-        tag: null,
-        tagDecided: false,
-        preRuleKey: `pre:imported_payee:contains:${newMatchValue}:payee:${s.suggestedName}`,
-        wasVetted: false,
-        touched: true,
-        skipped: false,
-      });
-      console.log(chalk.green(`  ✓ Split off ${removed.length} raw payee(s) → "${s.suggestedName}"`));
+    if (s.type === 'split') {
+      if (!result.applied) { console.log(chalk.yellow('  ⚠ None of the listed raw payees found — skipped')); continue; }
+      if (result.newRow) rows.push(result.newRow);
+      console.log(chalk.green(`  ✓ Split off ${result.newRow?.rawPayees.length ?? 0} raw payee(s) → "${s.suggestedName}"`));
     }
 
     if (s.type === 'rename' && s.suggestedName) {
       const old = matchingRows[0].cleanPayee;
-      for (const row of matchingRows) {
-        row.cleanPayee = s.suggestedName;
-        row.preRuleKey = `pre:imported_payee:contains:${row.matchValue}:payee:${s.suggestedName}`;
-        row.touched = true;
-      }
       console.log(chalk.green(`  ✓ Renamed "${old}" → "${s.suggestedName}" (${matchingRows.length} row(s))`));
     }
 
     if (s.type === 'category' && s.suggestedCategory) {
-      for (const row of matchingRows) {
-        row.category = s.suggestedCategory;
-        row.touched = true;
-      }
       console.log(chalk.green(`  ✓ Category → "${s.suggestedCategory}" (${matchingRows.length} row(s))`));
     }
 
@@ -239,7 +201,6 @@ export async function browseAndVet(
 
   // ── Phase 1: compute clean-name proposals in parallel ───────────────────────
 
-  type RawMeta = { matchValue: string; cleanPayee: string; preRuleKey: string; wasVetted: boolean };
   const rawMeta = new Map<string, RawMeta>();
 
   let p1done = 0, p1vetted = 0, p1llm = 0, p1llmDone = 0;
@@ -248,10 +209,7 @@ export async function browseAndVet(
   // First pass: count how many need LLM calls (fast, no I/O)
   for (const rawPayee of uniqueRawPayees) {
     const txs = byRawPayee.get(rawPayee)!;
-    const matchedRule = findPreRule(rules, txs[0]);
-    const key = matchedRule ? ruleKey(matchedRule) : null;
-    const needsLlm = !vetted.findPayeeRule(rawPayee) && !(key && vetted.isVetted(key));
-    if (needsLlm) p1llm++;
+    if (computeVettedMeta(rawPayee, txs, rules, vetted, payeeById) === null) p1llm++;
   }
 
   const p1label = () => {
@@ -263,30 +221,14 @@ export async function browseAndVet(
 
   await withConcurrency(uniqueRawPayees, LLM_CONCURRENCY, async (rawPayee) => {
     const txs = byRawPayee.get(rawPayee)!;
-    const matchedRule = findPreRule(rules, txs[0]);
-    const key = matchedRule ? ruleKey(matchedRule) : null;
+    const meta = computeVettedMeta(rawPayee, txs, rules, vetted, payeeById);
 
-    const vettedByPayee = vetted.findPayeeRule(rawPayee);
-    if (vettedByPayee) {
-      rawMeta.set(rawPayee, { matchValue: vettedByPayee.matchValue, cleanPayee: vettedByPayee.actionValue, preRuleKey: vettedByPayee.key, wasVetted: true });
-      p1vetted++;
-    } else if (key && vetted.isVetted(key)) {
-      const stored = vetted.get(key)!;
-      rawMeta.set(rawPayee, { matchValue: stored.matchValue, cleanPayee: stored.actionValue, preRuleKey: key, wasVetted: true });
-      p1vetted++;
+    if (meta !== null) {
+      rawMeta.set(rawPayee, meta);
+      if (meta.wasVetted) p1vetted++;
     } else {
-      const rawValue = matchedRule?.actions.find(a => a.field === 'payee')?.value ?? rawPayee;
-      const resolvedValue = payeeById.get(rawValue) ?? rawValue;
-      const matchValue = matchedRule
-        ? (matchedRule.conditions.find(c => c.field === 'imported_payee')?.value ?? rawPayee)
-        : extractMatchValue(rawPayee);
-      const cleanPayee = matchedRule ? resolvedValue : await llm.proposePayee(rawPayee, knownPayeeNames);
-      rawMeta.set(rawPayee, {
-        matchValue,
-        cleanPayee,
-        preRuleKey: key ?? `pre:imported_payee:contains:${matchValue}:payee:${cleanPayee}`,
-        wasVetted: false,
-      });
+      const proposedName = await llm.proposePayee(rawPayee, knownPayeeNames);
+      rawMeta.set(rawPayee, buildProposedMeta(rawPayee, proposedName));
       p1llmDone++;
     }
 
@@ -297,30 +239,7 @@ export async function browseAndVet(
 
   // ── Group by matchValue (one row = one pre-rule) ─────────────────────────────
 
-  const rowsByMatch = new Map<string, PayeeRow>();
-  for (const rawPayee of uniqueRawPayees) {
-    const d = rawMeta.get(rawPayee)!;
-    const existing = rowsByMatch.get(d.matchValue);
-    if (existing) {
-      existing.rawPayees.push(rawPayee);
-      existing.txCount += byRawPayee.get(rawPayee)?.length ?? 0;
-      continue;
-    }
-    const catRule = vetted.findCategoryRule(d.cleanPayee);
-    rowsByMatch.set(d.matchValue, {
-      rawPayees: [rawPayee],
-      txCount: byRawPayee.get(rawPayee)?.length ?? 0,
-      matchValue: d.matchValue,
-      cleanPayee: d.cleanPayee,
-      category: catRule?.actionValue ?? null,
-      tag: vetted.hasTag(d.cleanPayee) ? vetted.getTag(d.cleanPayee) : null,
-      tagDecided: vetted.hasTag(d.cleanPayee),
-      preRuleKey: d.preRuleKey,
-      wasVetted: d.wasVetted,
-      touched: false,
-      skipped: false,
-    });
-  }
+  const rowsByMatch = buildPayeeRows(uniqueRawPayees, rawMeta, byRawPayee, vetted);
 
   // ── Phase 2: category proposals for new rows (parallel) ─────────────────────
 
@@ -349,15 +268,7 @@ export async function browseAndVet(
 
   if (runReview) {
     process.stdout.write(chalk.dim('Reviewing groupings for anomalies…'));
-    // Aggregate rows by clean payee name so the LLM sees one entry per
-    // logical payee with ALL raw strings — not separate entries per match pattern.
-    const groupMap = new Map<string, { cleanPayee: string; category: string | null; rawPayees: string[] }>();
-    for (const row of rows) {
-      const key = row.cleanPayee.toLowerCase();
-      if (!groupMap.has(key)) groupMap.set(key, { cleanPayee: row.cleanPayee, category: row.category, rawPayees: [] });
-      groupMap.get(key)!.rawPayees.push(...row.rawPayees);
-    }
-    const groups = [...groupMap.values()];
+    const groups = aggregateGroupsForReview(rows);
     const suggestions = await llm.reviewGroupings(groups);
     process.stdout.write('\r' + chalk.dim(`Reviewing groupings for anomalies… ${suggestions.length} suggestion(s) found.\n`));
 

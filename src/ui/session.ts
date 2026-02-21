@@ -5,6 +5,7 @@ import type { VettedRuleStore } from '../rules/vetted.js';
 import type { ActualClient } from '../actual/client.js';
 import { detectAndLinkTransfers } from './transfers.js';
 import { TAG_CHOICES } from './constants.js';
+import { buildConsolidationGroups } from '../core/session.js';
 
 // ── Edit session decisions ─────────────────────────────────────────────────────
 
@@ -363,17 +364,7 @@ export async function consolidateVettedRules(
   vetted: VettedRuleStore,
   llm: LLMAdapter,
 ): Promise<void> {
-  // Group pre-stage rules by actionValue (clean payee name)
-  const allPreRules = vetted.getAllRules().filter(r => r.stage === 'pre');
-  const byAction = new Map<string, VettedRule[]>();
-  for (const rule of allPreRules) {
-    const key = rule.actionValue.toLowerCase();
-    if (!byAction.has(key)) byAction.set(key, []);
-    byAction.get(key)!.push(rule);
-  }
-
-  // Only groups with 2+ distinct match patterns are consolidation candidates
-  const groups = [...byAction.values()].filter(g => g.length > 1);
+  const groups = buildConsolidationGroups(vetted);
 
   if (groups.length === 0) {
     console.log(chalk.dim('  No consolidation candidates found.'));
@@ -382,9 +373,7 @@ export async function consolidateVettedRules(
 
   console.log(chalk.dim(`  Found ${groups.length} payee(s) with multiple match patterns — asking AI for suggestions…`));
 
-  const suggestions = await llm.suggestConsolidation(
-    groups.map(g => ({ actionValue: g[0].actionValue, matchValues: g.map(r => r.matchValue) })),
-  );
+  const suggestions = await llm.suggestConsolidation(groups);
 
   if (suggestions.length === 0) {
     console.log(chalk.dim('  No consolidation suggestions returned.'));
@@ -392,14 +381,14 @@ export async function consolidateVettedRules(
   }
 
   for (const s of suggestions) {
-    const group = groups.find(g => g[0].actionValue.toLowerCase() === s.actionValue.toLowerCase());
+    const group = groups.find(g => g.actionValue.toLowerCase() === s.actionValue.toLowerCase());
     if (!group) continue;
 
     console.log('');
     console.log(`${chalk.bold.cyan('[CONSOLIDATE]')}  ${chalk.bold(s.actionValue)}`);
     console.log(chalk.dim('  Current patterns:'));
-    for (const rule of group) {
-      console.log(chalk.dim(`    • ${rule.matchValue}`));
+    for (const mv of group.matchValues) {
+      console.log(chalk.dim(`    • ${mv}`));
     }
     console.log(`  Suggested:  ${chalk.yellow(s.suggestedMatchValue)}`);
     console.log(chalk.dim('  ' + s.reason));
@@ -420,14 +409,13 @@ export async function consolidateVettedRules(
       matchValue = (await input({ message: 'Match pattern (contains):', default: matchValue })).trim();
     }
 
-    // Remove the old per-variant rules
-    for (const rule of group) {
-      vetted.remove(rule.key);
+    // Remove the old per-variant rules (key format is stable: pre:imported_payee:contains:...)
+    for (const mv of group.matchValues) {
+      vetted.remove(`pre:imported_payee:contains:${mv}:payee:${group.actionValue}`);
     }
 
-    // Save one consolidated rule (reuse the first rule's metadata as a template)
-    const template = group[0];
-    const newKey = `pre:imported_payee:contains:${matchValue}:payee:${template.actionValue}`;
+    // Save one consolidated rule
+    const newKey = `pre:imported_payee:contains:${matchValue}:payee:${group.actionValue}`;
     vetted.approve({
       key: newKey,
       stage: 'pre',
@@ -435,11 +423,11 @@ export async function consolidateVettedRules(
       matchOp: 'contains',
       matchValue,
       actionField: 'payee',
-      actionValue: template.actionValue,
+      actionValue: group.actionValue,
       vettedAt: new Date().toISOString(),
     });
 
-    console.log(chalk.green(`  ✓ Consolidated ${group.length} rules → "${matchValue}" → "${template.actionValue}"`));
+    console.log(chalk.green(`  ✓ Consolidated ${group.matchValues.length} rules → "${matchValue}" → "${group.actionValue}"`));
   }
 }
 

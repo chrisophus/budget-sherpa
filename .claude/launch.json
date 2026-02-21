@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "test:watch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "test:watch"],
+      "port": 51204
+    },
+    {
+      "name": "build:watch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "build", "--", "--watch"],
+      "port": 51205
+    }
+  ]
+}
